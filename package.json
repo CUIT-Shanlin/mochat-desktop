@@ -51,10 +51,12 @@
     "directories": { "output": "release" },
     "files": ["dist/**/*", "electron/**/*", "package.json"],
     "mac": {
+      "icon": "build/icon.png",
       "category": "public.app-category.social-networking",
       "target": ["dmg", "zip"]
     },
     "win": {
+      "icon": "build/icon.png",
       "target": ["nsis", "portable"]
     },
     "nsis": {

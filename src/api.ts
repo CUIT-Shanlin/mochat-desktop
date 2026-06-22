@@ -1,10 +1,13 @@
 import type { Session } from './types'
 
-const baseUrl = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080').replace(/\/$/, '')
 const demoEnabled = import.meta.env.VITE_DEMO_MODE !== 'false'
 
+export function getApiBaseUrl() {
+  return (localStorage.getItem('mochat.server') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080').replace(/\/$/, '')
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetch(`${getApiBaseUrl()}${path}`, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
@@ -37,4 +40,28 @@ export const api = {
   history: (sessionId: string, conversationId: number) => request<{ items: unknown[] }>(`/history?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&limit=50`),
   createGroup: (sessionId: string, name: string) => request('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
   sendFriendRequest: (sessionId: string, toUserId: number) => request('/friends/requests', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, sign: '' }) }),
+}
+
+export class CallSignaling {
+  private socket: WebSocket | null = null
+
+  connect(sessionId: string, onSignal: (payload: unknown) => void) {
+    const configured = localStorage.getItem('mochat.callWs') || import.meta.env.VITE_CALL_WS_URL
+    const origin = configured || getApiBaseUrl().replace(/^http/, 'ws')
+    this.socket = new WebSocket(`${origin.replace(/\/$/, '')}/calls/ws/${encodeURIComponent(sessionId)}`)
+    this.socket.onmessage = (event) => {
+      try { onSignal(JSON.parse(event.data)) } catch { onSignal(event.data) }
+    }
+    return this.socket
+  }
+
+  send(payload: unknown) {
+    if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('通话信令尚未连接')
+    this.socket.send(JSON.stringify(payload))
+  }
+
+  disconnect() {
+    this.socket?.close()
+    this.socket = null
+  }
 }

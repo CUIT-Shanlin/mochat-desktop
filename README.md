@@ -48,6 +48,8 @@ npm run dist:mac
 npm run dist:win
 ```
 
+安装包和解压后的应用统一输出到 `dist/`。`dist:mac` 生成 Apple Silicon (`arm64`) 版本，`dist:win` 生成适用于主流 Windows 电脑的 `x64` 版本；也可以在 macOS 上交叉生成 Windows 安装包。
+
 Windows 安装包建议由 Windows 或 GitHub Actions 构建；macOS 同理。CI 会在两个系统上分别产出可下载制品。
 
 ## 后端协议

@@ -27,7 +27,7 @@ function createWindow() {
   })
 
   if (isDev) window.loadURL('http://localhost:5173')
-  else window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  else window.loadFile(path.join(__dirname, '..', 'build', 'renderer', 'index.html'))
 }
 
 ipcMain.handle('dialog:select-files', async () => {

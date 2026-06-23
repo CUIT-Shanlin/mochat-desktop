@@ -19,6 +19,7 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "livekit-client": "^2.19.2",
     "lucide-react": "^1.21.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
@@ -48,16 +49,32 @@
   "build": {
     "appId": "cn.edu.cuit.shanlin.mochat",
     "productName": "MoChat",
-    "directories": { "output": "dist" },
-    "files": ["build/renderer/**/*", "electron/**/*", "package.json"],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "build/renderer/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
     "mac": {
       "icon": "build/icon.png",
       "category": "public.app-category.social-networking",
-      "target": ["dmg", "zip"]
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "extendInfo": {
+        "NSCameraUsageDescription": "MoChat needs camera access for video calls.",
+        "NSMicrophoneUsageDescription": "MoChat needs microphone access for voice and video calls."
+      }
     },
     "win": {
       "icon": "build/icon.png",
-      "target": ["nsis", "portable"]
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "nsis": {
       "oneClick": false,

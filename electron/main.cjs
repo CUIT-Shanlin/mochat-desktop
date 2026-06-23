@@ -25,6 +25,9 @@ function createWindow() {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
+  window.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(['media', 'camera', 'microphone'].includes(permission))
+  })
 
   if (isDev) window.loadURL('http://localhost:5173')
   else window.loadFile(path.join(__dirname, '..', 'build', 'renderer', 'index.html'))

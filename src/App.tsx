@@ -1,14 +1,15 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check, ChevronDown, ContactRound, FileText, Image, Info, LogOut, Menu,
   MessageSquare, Mic, Minus, MoreVertical, Paperclip, Phone, Plus, Search, Send,
   Settings, Smile, UserPlus, Users, Video, Volume2, Wifi, WifiOff, X,
 } from 'lucide-react'
+import type { Room } from 'livekit-client'
 import './App.css'
-import { api } from './api'
+import { CallSignaling, api, getCallWsUrl } from './api'
 import { Avatar, EmptyState, Logo, Modal } from './components'
 import { conversations as seedConversations, friendRequests, initialMessages } from './data'
-import type { ChatMessage, Conversation, Session } from './types'
+import type { CallSession, ChatMessage, Conversation, Session } from './types'
 
 type Section = 'chats' | 'contacts' | 'groups' | 'requests' | 'settings'
 
@@ -93,18 +94,29 @@ function ConversationList({ items, selected, onSelect }: { items: Conversation[]
   </aside>
 }
 
-function Chat({ conversation, messages, onSend, onCall }: { conversation: Conversation; messages: ChatMessage[]; onSend: (text: string) => void; onCall: (kind: 'voice' | 'video') => void }) {
+function Chat({ conversation, messages, onSend, onCall }: { conversation: Conversation; messages: ChatMessage[]; onSend: (text: string, attachments: File[]) => Promise<void>; onCall: (kind: 'voice' | 'video') => void }) {
   const [draft, setDraft] = useState('')
-  const [attachments, setAttachments] = useState<string[]>([])
+  const [attachments, setAttachments] = useState<File[]>([])
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState('')
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const current = messages.filter((message) => message.conversationId === conversation.id)
-  async function attach() {
-    const files = window.mochatDesktop ? await window.mochatDesktop.selectFiles() : []
-    setAttachments(files)
-  }
-  function send() {
-    const text = draft.trim() || (attachments.length ? `📎 ${attachments.map((file) => file.split(/[\\/]/).pop()).join('、')}` : '')
-    if (!text) return
-    onSend(text); setDraft(''); setAttachments([])
+  async function send() {
+    const files = attachments
+    const text = draft.trim() || (files.length ? `附件：${files.map((file) => file.name).join('、')}` : '')
+    if (!text || sending) return
+    setSending(true)
+    setError('')
+    try {
+      await onSend(text, files)
+      setDraft('')
+      setAttachments([])
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '发送失败')
+    } finally {
+      setSending(false)
+    }
   }
   return <section className="chat-panel">
     <header className="chat-header"><div className="chat-person"><Avatar initials={conversation.initials} color={conversation.color} size="sm" online={conversation.online} /><span><strong>{conversation.name}</strong><small>{conversation.online ? '在线' : conversation.kind === 'group' ? '5 位成员' : '离线'}</small></span></div><div className="chat-actions"><button onClick={() => onCall('voice')} title="语音通话"><Phone /></button><button onClick={() => onCall('video')} title="视频通话"><Video /></button><button title="会话详情"><MoreVertical /></button></div></header>
@@ -116,10 +128,12 @@ function Chat({ conversation, messages, onSend, onCall }: { conversation: Conver
       </div>)}
     </div>
     <footer className="composer">
-      {attachments.length > 0 && <div className="attachment-preview"><FileText /><span>{attachments.map((file) => file.split(/[\\/]/).pop()).join('、')}</span><button onClick={() => setAttachments([])}><X /></button></div>}
-      <div className="composer-tools"><button title="表情"><Smile /></button><button title="选择图片"><Image /></button><button title="添加附件" onClick={attach}><Paperclip /></button><button title="语音消息"><Mic /></button></div>
+      {attachments.length > 0 && <div className="attachment-preview"><FileText /><span>{attachments.map((file) => file.name).join('、')}</span><button onClick={() => setAttachments([])}><X /></button></div>}
+      {error && <div className="composer-error">{error}</div>}
+      <input ref={fileInputRef} className="file-picker" type="file" multiple onChange={(event) => setAttachments(Array.from(event.target.files ?? []))} />
+      <div className="composer-tools"><button title="表情"><Smile /></button><button title="选择图片" onClick={() => fileInputRef.current?.click()}><Image /></button><button title="添加附件" onClick={() => fileInputRef.current?.click()}><Paperclip /></button><button title="语音消息"><Mic /></button></div>
       <textarea aria-label="消息" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() } }} placeholder="输入消息，Enter 发送，Shift + Enter 换行" />
-      <button className="send-button" disabled={!draft.trim() && !attachments.length} onClick={send}><Send /><span>发送</span></button>
+      <button className="send-button" disabled={sending || (!draft.trim() && !attachments.length)} onClick={send}><Send /><span>{sending ? '发送中' : '发送'}</span></button>
     </footer>
   </section>
 }
@@ -127,16 +141,69 @@ function Chat({ conversation, messages, onSend, onCall }: { conversation: Conver
 function Directory({ section, session }: { section: Exclude<Section, 'chats'>; session: Session }) {
   const [requests, setRequests] = useState(friendRequests)
   const [server, setServer] = useState(localStorage.getItem('mochat.server') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080')
+  const [callServer, setCallServer] = useState(localStorage.getItem('mochat.callServer') || import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090')
+  const [callWs, setCallWs] = useState(localStorage.getItem('mochat.callWs') || import.meta.env.VITE_CALL_WS_URL || getCallWsUrl())
+  const [mediaServer, setMediaServer] = useState(localStorage.getItem('mochat.mediaServer') || import.meta.env.VITE_MEDIA_BASE_URL || 'http://localhost:8083')
   const [notifications, setNotifications] = useState(true)
-  if (section === 'settings') return <section className="page-panel"><header><h1>设置</h1><p>管理客户端偏好与服务连接</p></header><div className="settings-card"><h3>账号</h3><div className="account-row"><Avatar initials={session.username[0]} color="#607be8" size="lg" /><div><strong>{session.username}</strong><span>用户 ID：{session.userId}</span><em>{session.demo ? '演示模式' : '已连接服务'}</em></div></div></div><div className="settings-card"><h3>连接</h3><label>API 服务地址<input value={server} onChange={(event) => setServer(event.target.value)} /></label><button className="primary-button" onClick={() => localStorage.setItem('mochat.server', server)}>保存配置</button></div><div className="settings-card toggle-row"><div><h3>桌面通知</h3><p>收到新消息时显示系统通知</p></div><button className={`toggle ${notifications ? 'on' : ''}`} onClick={() => setNotifications(!notifications)}><i /></button></div></section>
+  if (section === 'settings') return <section className="page-panel"><header><h1>设置</h1><p>管理客户端偏好与服务连接</p></header><div className="settings-card"><h3>账号</h3><div className="account-row"><Avatar initials={session.username[0]} color="#607be8" size="lg" /><div><strong>{session.username}</strong><span>用户 ID：{session.userId}</span><em>{session.demo ? '演示模式' : '已连接服务'}</em></div></div></div><div className="settings-card"><h3>连接</h3><label>API 服务地址<input value={server} onChange={(event) => setServer(event.target.value)} /></label><label>Call 服务地址<input value={callServer} onChange={(event) => setCallServer(event.target.value)} /></label><label>Call WebSocket 地址<input value={callWs} onChange={(event) => setCallWs(event.target.value)} /></label><label>Media 服务地址<input value={mediaServer} onChange={(event) => setMediaServer(event.target.value)} /></label><button className="primary-button" onClick={() => { localStorage.setItem('mochat.server', server); localStorage.setItem('mochat.callServer', callServer); localStorage.setItem('mochat.callWs', callWs); localStorage.setItem('mochat.mediaServer', mediaServer) }}>保存配置</button></div><div className="settings-card toggle-row"><div><h3>桌面通知</h3><p>收到新消息时显示系统通知</p></div><button className={`toggle ${notifications ? 'on' : ''}`} onClick={() => setNotifications(!notifications)}><i /></button></div></section>
   if (section === 'requests') return <section className="page-panel"><header><h1>新的朋友</h1><p>{requests.filter((item) => item.status === 'pending').length} 个待处理申请</p></header><div className="directory-list">{requests.map((request) => <div className="request-row" key={request.id}><Avatar initials={request.name[0]} color={request.id === 1 ? '#7b69d9' : '#3a9d89'} /><div><strong>{request.name}</strong><span>{request.message}</span><small>用户 ID：{request.userId}</small></div>{request.status === 'pending' ? <div className="request-actions"><button onClick={() => setRequests(requests.map((item) => item.id === request.id ? { ...item, status: 'rejected' } : item))}>忽略</button><button className="primary-button" onClick={() => setRequests(requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' } : item))}>接受</button></div> : <em>{request.status === 'accepted' ? '已添加' : '已忽略'}</em>}</div>)}</div></section>
   const isGroup = section === 'groups'
   const source = seedConversations.filter((item) => isGroup ? item.kind === 'group' : item.kind === 'private')
   return <section className="page-panel"><header><div><h1>{isGroup ? '群组' : '联系人'}</h1><p>{source.length} {isGroup ? '个群聊' : '位联系人'}</p></div><button className="primary-button"><Plus />{isGroup ? '创建群组' : '添加好友'}</button></header><div className="directory-list">{source.map((item) => <div className="directory-row" key={item.id}><Avatar initials={item.initials} color={item.color} online={item.online} /><div><strong>{item.name}</strong><span>{isGroup ? `${item.targetId} · 5 位成员` : `用户 ID：${item.targetId}`}</span></div><button className="ghost-button"><MessageSquare />发消息</button><button className="icon-button"><MoreVertical /></button></div>)}</div></section>
 }
 
-function CallModal({ conversation, kind, onClose }: { conversation: Conversation; kind: 'voice' | 'video'; onClose: () => void }) {
-  return <div className="call-backdrop"><section className="call-card"><div className="call-pulse"><Avatar initials={conversation.initials} color={conversation.color} size="lg" /></div><h2>{conversation.name}</h2><p>{kind === 'video' ? '正在发起视频通话…' : '正在发起语音通话…'}</p><div className="call-status"><Wifi />端到端加密连接</div><div className="call-buttons"><button><Volume2 /></button><button><Mic /></button><button className="hangup" onClick={onClose}><Phone /></button></div></section></div>
+function CallModal({ session, conversation, kind, onClose }: { session: Session; conversation: Conversation; kind: 'voice' | 'video'; onClose: () => void }) {
+  const [status, setStatus] = useState('正在请求通话服务…')
+  const [callSession, setCallSession] = useState<CallSession | null>(null)
+  const [room, setRoom] = useState<Room | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    let activeRoom: Room | null = null
+    async function startCall() {
+      try {
+        const result = conversation.kind === 'group'
+          ? await api.startGroupCall(session.sessionId, conversation.targetId)
+          : await api.startPrivateCall(session.sessionId, conversation.targetId)
+        if (cancelled) return
+        setCallSession(result)
+        if (!result.token || !result.livekitUrl) {
+          setStatus('通话邀请已发送，等待对方上线或接听')
+          return
+        }
+        setStatus('正在连接 LiveKit 房间…')
+        const { Room } = await import('livekit-client')
+        const livekitRoom = new Room()
+        activeRoom = livekitRoom
+        await livekitRoom.connect(result.livekitUrl, result.token)
+        if (cancelled) {
+          livekitRoom.disconnect()
+          return
+        }
+        await livekitRoom.localParticipant.setMicrophoneEnabled(true)
+        if (kind === 'video') await livekitRoom.localParticipant.setCameraEnabled(true)
+        setRoom(livekitRoom)
+        setStatus(kind === 'video' ? '视频通话已连接' : '语音通话已连接')
+      } catch (reason) {
+        setStatus(reason instanceof Error ? reason.message : '通话服务连接失败')
+      }
+    }
+    startCall()
+    return () => {
+      cancelled = true
+      activeRoom?.disconnect()
+    }
+  }, [conversation.kind, conversation.targetId, kind, session.sessionId])
+
+  async function hangup() {
+    if (callSession?.roomName && conversation.kind === 'group') {
+      await api.leaveGroupCall(session.sessionId, callSession.roomName).catch(() => undefined)
+    }
+    room?.disconnect()
+    onClose()
+  }
+
+  return <div className="call-backdrop"><section className="call-card"><div className="call-pulse"><Avatar initials={conversation.initials} color={conversation.color} size="lg" /></div><h2>{conversation.name}</h2><p>{kind === 'video' ? '正在发起视频通话…' : '正在发起语音通话…'}</p><div className="call-status"><Wifi />{status}</div>{callSession?.roomName && <div className="call-room">房间：{callSession.roomName}</div>}<div className="call-buttons"><button title="扬声器"><Volume2 /></button><button title="麦克风"><Mic /></button><button className="hangup" onClick={hangup} title="挂断"><Phone /></button></div></section></div>
 }
 
 function MainApp({ session, onLogout }: { session: Session; onLogout: () => void }) {
@@ -145,16 +212,33 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [messages, setMessages] = useState(initialMessages)
   const [call, setCall] = useState<'voice' | 'video' | null>(null)
   const selectedConversation = useMemo(() => seedConversations.find((item) => item.id === selected) ?? seedConversations[0], [selected])
-  function send(text: string) {
+  const signaling = useMemo(() => new CallSignaling(), [])
+  useEffect(() => {
+    if (session.demo) return
+    const socket = signaling.connect(session.sessionId, (payload) => {
+      if (payload.type?.startsWith('call_')) console.info('MoChat call signal', payload)
+    })
+    socket.onerror = () => console.warn('MoChat call signaling disconnected')
+    return () => signaling.disconnect()
+  }, [session.demo, session.sessionId, signaling])
+  async function send(text: string, attachments: File[]) {
     const now = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
-    setMessages((current) => [...current, { id: Date.now(), conversationId: selected, fromMe: true, text, time: now, status: 'sent' }])
+    const optimisticId = Date.now()
+    setMessages((current) => [...current, { id: optimisticId, conversationId: selected, fromMe: true, text, time: now, status: 'sending' }])
+    if (!session.demo) {
+      for (const file of attachments) {
+        const media = await api.uploadMedia(file)
+        await api.sendMultimediaMessage(session.sessionId, selectedConversation, media)
+      }
+    }
+    setMessages((current) => current.map((message) => message.id === optimisticId ? { ...message, status: 'sent' } : message))
   }
   return <main className="app-shell">
     <WindowControls />
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
     {section === 'chats' ? <><ConversationList items={seedConversations} selected={selected} onSelect={setSelected} /><Chat conversation={selectedConversation} messages={messages} onSend={send} onCall={setCall} /></> : <Directory section={section} session={session} />}
     <div className={`connection-pill ${session.demo ? 'demo' : ''}`}>{session.demo ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : '服务已连接'}<ChevronDown /></div>
-    {call && <CallModal conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
+    {call && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
   </main>
 }
 

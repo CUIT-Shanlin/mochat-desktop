@@ -27,6 +27,8 @@ export interface ChatMessage {
   text: string
   time: string
   status?: 'sending' | 'sent' | 'read' | 'failed'
+  mediaUrl?: string
+  fileName?: string
 }
 
 export interface FriendRequest {
@@ -35,4 +37,41 @@ export interface FriendRequest {
   userId: number
   message: string
   status: 'pending' | 'accepted' | 'rejected'
+}
+
+export type MediaMessageType = 'image' | 'video' | 'audio' | 'file'
+
+export interface MediaUpload {
+  mediaId: string
+  mediaUrl: string
+  thumbnailUrl?: string
+  objectName: string
+  fileSize: number
+  mimeType: string
+  fileName: string
+  waveformData?: string
+}
+
+export interface CallSession {
+  callId?: string
+  roomName: string
+  fromUserId?: number
+  toUserId?: number
+  groupId?: number
+  token?: string
+  livekitUrl?: string
+  queuedUserIds?: number[]
+}
+
+export interface CallSignalPayload {
+  type: string
+  callId?: string
+  fromUserId?: number
+  toUserId?: number
+  groupId?: number
+  roomName?: string
+  token?: string
+  livekitUrl?: string
+  timestampMillis?: number
+  message?: string
 }

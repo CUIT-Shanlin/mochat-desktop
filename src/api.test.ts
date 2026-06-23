@@ -23,12 +23,25 @@ describe('MoChat API client', () => {
 
   it('falls back to a demo session when the backend is unavailable', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ userId: 7, username: 'alice', sessionId: 'session-7' }),
+      ok: false,
+      json: () => Promise.resolve({ message: 'offline' }),
     }))
-    vi.spyOn(crypto.subtle, 'generateKey').mockRejectedValue(new Error('unavailable'))
     const session = await api.login('alice')
     expect(session.username).toBe('alice')
     expect(session.demo).toBe(true)
+  })
+
+  it('keeps a stable 32-byte identity key per username', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ userId: 7, username: 'alice', sessionId: 'session-7' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await api.login('alice')
+    await api.login('alice')
+    const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body as string)
+    expect(firstBody.publicKey).toBe(secondBody.publicKey)
+    expect(Uint8Array.from(atob(firstBody.publicKey), (char) => char.charCodeAt(0))).toHaveLength(32)
   })
 })

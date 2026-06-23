@@ -33,16 +33,24 @@ const apiRequest = <T>(path: string, init?: RequestInit) => request<T>(getApiBas
 const callRequest = <T>(path: string, init?: RequestInit) => request<T>(getCallBaseUrl(), path, init)
 const mediaRequest = <T>(path: string, init?: RequestInit) => request<T>(getMediaBaseUrl(), path, init)
 
-async function generatePublicKey(): Promise<string> {
-  const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey'])
-  const bytes = await crypto.subtle.exportKey('spki', pair.publicKey)
-  return btoa(String.fromCharCode(...new Uint8Array(bytes)))
+function generatePublicKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return btoa(String.fromCharCode(...bytes))
+}
+
+function identityKeyFor(username: string) {
+  const storageKey = `mochat.identityKey.${username}`
+  const existing = localStorage.getItem(storageKey)
+  if (existing) return existing
+  const publicKey = generatePublicKey()
+  localStorage.setItem(storageKey, publicKey)
+  return publicKey
 }
 
 export const api = {
   async login(username: string): Promise<Session> {
     try {
-      const publicKey = await generatePublicKey()
+      const publicKey = identityKeyFor(username)
       return await apiRequest<Session>('/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, publicKey }),

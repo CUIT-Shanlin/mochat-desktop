@@ -244,7 +244,10 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(() => {
-    try { return JSON.parse(localStorage.getItem('mochat.session') || 'null') }
+    try {
+      const saved = JSON.parse(localStorage.getItem('mochat.session') || 'null') as Session | null
+      return saved?.demo ? null : saved
+    }
     catch { return null }
   })
   function logout() { localStorage.removeItem('mochat.session'); setSession(null) }

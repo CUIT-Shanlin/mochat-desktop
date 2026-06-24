@@ -1,7 +1,69 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
+const { spawn } = require('node:child_process')
+const os = require('node:os')
 const path = require('node:path')
 
 const isDev = !app.isPackaged
+const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
+
+function launchTestWindow() {
+  const userDataDir = path.join(os.tmpdir(), `mochat-test-${Date.now()}`)
+  const args = isDev
+    ? [app.getAppPath(), `--user-data-dir=${userDataDir}`, '--mochat-test-window']
+    : [`--user-data-dir=${userDataDir}`, '--mochat-test-window']
+
+  const child = spawn(process.execPath, args, {
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+}
+
+function setupMenus() {
+  const testWindowItem = {
+    label: '新建测试窗口（多账号）',
+    accelerator: 'CmdOrCtrl+Shift+N',
+    click: launchTestWindow,
+  }
+
+  if (process.platform === 'darwin') {
+    app.dock?.setMenu(Menu.buildFromTemplate([testWindowItem]))
+  }
+
+  const template = [
+    ...(process.platform === 'darwin'
+      ? [{
+          label: app.name,
+          submenu: [
+            { label: '关于 MoChat', role: 'about' },
+            { type: 'separator' },
+            testWindowItem,
+            { type: 'separator' },
+            { role: 'services' },
+            { type: 'separator' },
+            { role: 'hide' },
+            { role: 'hideOthers' },
+            { role: 'unhide' },
+            { type: 'separator' },
+            { role: 'quit' },
+          ],
+        }]
+      : []),
+    {
+      label: '测试',
+      submenu: [testWindowItem],
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'close' },
+      ],
+    },
+  ]
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
 
 function createWindow() {
   const window = new BrowserWindow({
@@ -53,7 +115,9 @@ ipcMain.on('window:maximize', (event) => {
 ipcMain.on('window:close', (event) => BrowserWindow.fromWebContents(event.sender)?.close())
 
 app.whenReady().then(() => {
+  setupMenus()
   createWindow()
+  if (isTestWindow) app.setName('MoChat 测试窗口')
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

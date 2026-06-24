@@ -1,4 +1,4 @@
-import type { BackendFriend, BackendGroup, CallSession, CallSignalPayload, Conversation, MediaMessageType, MediaUpload, Session } from './types'
+import type { BackendFriend, BackendFriendRequest, BackendGroup, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
 
 const demoEnabled = import.meta.env.VITE_DEMO_MODE !== 'false'
 
@@ -24,14 +24,25 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit): Pr
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok || body.success === false) throw new Error(body.error || body.message || `请求失败 (${response.status})`)
+  const text = await response.text().catch(() => '')
+  const body = parseJsonPreservingLargeIntegers(text)
+  const errorMessage = typeof body.error === 'string' ? body.error : typeof body.message === 'string' ? body.message : `请求失败 (${response.status})`
+  if (!response.ok || body.success === false) throw new Error(errorMessage)
   return (body.data ?? body) as T
 }
 
 const apiRequest = <T>(path: string, init?: RequestInit) => request<T>(getApiBaseUrl(), path, init)
 const callRequest = <T>(path: string, init?: RequestInit) => request<T>(getCallBaseUrl(), path, init)
 const mediaRequest = <T>(path: string, init?: RequestInit) => request<T>(getMediaBaseUrl(), path, init)
+
+function parseJsonPreservingLargeIntegers(text: string) {
+  if (!text) return {}
+  try {
+    return JSON.parse(text.replace(/(:\s*)(-?\d{16,})(?=\s*[,}\]])/g, '$1"$2"')) as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
 
 function generatePublicKey(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32))
@@ -62,12 +73,13 @@ export const api = {
   },
   friends: (sessionId: string) => apiRequest<{ friends?: BackendFriend[] }>(`/friends?sessionId=${encodeURIComponent(sessionId)}`),
   groups: (sessionId: string) => apiRequest<{ groups?: BackendGroup[] }>(`/groups?sessionId=${encodeURIComponent(sessionId)}`),
-  history: (sessionId: string, conversationId: number) => apiRequest<{ items: unknown[] }>(`/history?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&limit=50`),
-  createGroup: (sessionId: string, name: string) => apiRequest('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
-  sendFriendRequest: (sessionId: string, toUserId: number, sign = '') => apiRequest('/friends/requests', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, sign }) }),
-  handleFriendRequest: (sessionId: string, requestId: number, action: 'accept' | 'reject') => apiRequest(`/friends/requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),
-  startPrivateCall: (sessionId: string, toUserId: number) => callRequest<CallSession>('/calls/private/invite', { method: 'POST', body: JSON.stringify({ sessionId, toUserId }) }),
-  startGroupCall: (sessionId: string, groupId: number) => callRequest<CallSession>('/calls/group/start', { method: 'POST', body: JSON.stringify({ sessionId, groupId }) }),
+  history: (sessionId: string, conversationId: EntityId) => apiRequest<{ items: unknown[] }>(`/history?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&limit=50`),
+  createGroup: (sessionId: string, name: string) => apiRequest<{ group: BackendGroup }>('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
+  sendFriendRequest: (sessionId: string, toUserId: EntityId, sign = '') => apiRequest<{ request: BackendFriendRequest }>('/friends/requests', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, sign }) }),
+  receivedFriendRequests: (sessionId: string) => apiRequest<{ requests?: BackendFriendRequest[] }>(`/friends/requests/received?sessionId=${encodeURIComponent(sessionId)}`),
+  handleFriendRequest: (sessionId: string, requestId: EntityId, action: 'accept' | 'reject') => apiRequest<{ request: BackendFriendRequest }>(`/friends/requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),
+  startPrivateCall: (sessionId: string, toUserId: EntityId) => callRequest<CallSession>('/calls/private/invite', { method: 'POST', body: JSON.stringify({ sessionId, toUserId }) }),
+  startGroupCall: (sessionId: string, groupId: EntityId) => callRequest<CallSession>('/calls/group/start', { method: 'POST', body: JSON.stringify({ sessionId, groupId }) }),
   joinGroupCall: (sessionId: string, roomName: string) => callRequest<CallSession>('/calls/group/join', { method: 'POST', body: JSON.stringify({ sessionId, roomName }) }),
   leaveGroupCall: (sessionId: string, roomName: string) => callRequest<{ left: boolean }>('/calls/group/leave', { method: 'POST', body: JSON.stringify({ sessionId, roomName }) }),
   async uploadMedia(file: File): Promise<MediaUpload> {

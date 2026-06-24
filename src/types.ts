@@ -1,3 +1,5 @@
+export type EntityId = string | number
+
 export type ConversationKind = 'private' | 'group'
 
 export interface Session {
@@ -8,8 +10,8 @@ export interface Session {
 }
 
 export interface Conversation {
-  id: number
-  targetId: number
+  id: EntityId
+  targetId: EntityId
   kind: ConversationKind
   name: string
   initials: string
@@ -21,20 +23,30 @@ export interface Conversation {
 }
 
 export interface BackendFriend {
-  conversationId: number
-  userId: number
+  conversationId: EntityId
+  userId: EntityId
   username: string
 }
 
 export interface BackendGroup {
-  groupId: number
+  groupId: EntityId
   name: string
-  ownerUserId: number
+  ownerUserId: EntityId
+}
+
+export interface BackendFriendRequest {
+  requestId: EntityId
+  fromUserId: EntityId
+  toUserId: EntityId
+  sign: string
+  status: 'pending' | 'accepted' | 'rejected' | 'cancelled'
+  createdAtEpochMillis: number
+  handledAtEpochMillis?: number | null
 }
 
 export interface ChatMessage {
   id: number
-  conversationId: number
+  conversationId: EntityId
   fromMe: boolean
   text: string
   time: string
@@ -44,9 +56,9 @@ export interface ChatMessage {
 }
 
 export interface FriendRequest {
-  id: number
+  id: EntityId
   name: string
-  userId: number
+  userId: EntityId
   message: string
   status: 'pending' | 'accepted' | 'rejected'
 }

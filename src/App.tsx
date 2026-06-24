@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check, ChevronDown, ContactRound, FileText, Image, Info, LogOut, Menu,
   MessageSquare, Mic, Minus, MoreVertical, Paperclip, Phone, Plus, Search, Send,
@@ -9,7 +9,7 @@ import './App.css'
 import { CallSignaling, api, getCallWsUrl } from './api'
 import { Avatar, EmptyState, Logo, Modal } from './components'
 import { conversations as seedConversations, friendRequests, initialMessages } from './data'
-import type { BackendFriend, BackendGroup, CallSession, ChatMessage, Conversation, Session } from './types'
+import type { BackendFriend, BackendFriendRequest, BackendGroup, CallSession, ChatMessage, Conversation, EntityId, FriendRequest, Session } from './types'
 
 type Section = 'chats' | 'contacts' | 'groups' | 'requests' | 'settings'
 
@@ -19,8 +19,9 @@ function initialsFor(name: string) {
   return (name.trim().slice(0, 1) || '?').toUpperCase()
 }
 
-function colorFor(id: number) {
-  return avatarPalette[Math.abs(id) % avatarPalette.length]
+function colorFor(id: EntityId) {
+  const value = String(id).split('').reduce((sum, char) => sum + char.charCodeAt(0), 0)
+  return avatarPalette[value % avatarPalette.length]
 }
 
 function friendToConversation(friend: BackendFriend): Conversation {
@@ -51,6 +52,16 @@ function groupToConversation(group: BackendGroup): Conversation {
     preview: '暂无消息',
     time: '',
     unread: 0,
+  }
+}
+
+function friendRequestToViewModel(request: BackendFriendRequest): FriendRequest {
+  return {
+    id: request.requestId,
+    name: `用户 ${request.fromUserId}`,
+    userId: request.fromUserId,
+    message: request.sign || '请求添加你为好友',
+    status: request.status === 'cancelled' ? 'rejected' : request.status,
   }
 }
 
@@ -120,7 +131,7 @@ function Sidebar({ section, setSection, session, onLogout }: { section: Section;
   </aside>
 }
 
-function ConversationList({ items, selected, onSelect }: { items: Conversation[]; selected: number | null; onSelect: (id: number) => void }) {
+function ConversationList({ items, selected, onSelect }: { items: Conversation[]; selected: EntityId | null; onSelect: (id: EntityId) => void }) {
   const [query, setQuery] = useState('')
   const filtered = items.filter((item) => `${item.name}${item.preview}`.toLowerCase().includes(query.toLowerCase()))
   return <aside className="conversation-panel">
@@ -179,18 +190,130 @@ function Chat({ conversation, messages, onSend, onCall }: { conversation: Conver
   </section>
 }
 
-function Directory({ section, session, conversations }: { section: Exclude<Section, 'chats'>; session: Session; conversations: Conversation[] }) {
-  const [requests, setRequests] = useState(session.demo ? friendRequests : [])
+function Directory({
+  section,
+  session,
+  conversations,
+  onRefreshDirectory,
+  onOpenConversation,
+}: {
+  section: Exclude<Section, 'chats'>
+  session: Session
+  conversations: Conversation[]
+  onRefreshDirectory: () => Promise<void>
+  onOpenConversation: (conversationId: EntityId) => void
+}) {
+  const [requests, setRequests] = useState<FriendRequest[]>(session.demo ? friendRequests : [])
   const [server, setServer] = useState(localStorage.getItem('mochat.server') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080')
   const [callServer, setCallServer] = useState(localStorage.getItem('mochat.callServer') || import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090')
   const [callWs, setCallWs] = useState(localStorage.getItem('mochat.callWs') || import.meta.env.VITE_CALL_WS_URL || getCallWsUrl())
   const [mediaServer, setMediaServer] = useState(localStorage.getItem('mochat.mediaServer') || import.meta.env.VITE_MEDIA_BASE_URL || 'http://localhost:8083')
   const [notifications, setNotifications] = useState(true)
+  const [dialog, setDialog] = useState<'friend' | 'group' | null>(null)
+  const [friendUserId, setFriendUserId] = useState('')
+  const [friendSign, setFriendSign] = useState('你好，我想添加你为好友')
+  const [groupName, setGroupName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (session.demo || section !== 'requests') return
+    let cancelled = false
+    async function loadRequests() {
+      setError('')
+      try {
+        const response = await api.receivedFriendRequests(session.sessionId)
+        if (!cancelled) setRequests((response.requests ?? []).map(friendRequestToViewModel))
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : '加载好友申请失败')
+      }
+    }
+    loadRequests()
+    return () => {
+      cancelled = true
+    }
+  }, [section, session.demo, session.sessionId])
+
+  async function submitFriendRequest() {
+    const toUserId = friendUserId.trim()
+    if (!/^\d+$/.test(toUserId)) {
+      setError('请输入正确的用户 ID')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      await api.sendFriendRequest(session.sessionId, toUserId, friendSign.trim())
+      setDialog(null)
+      setFriendUserId('')
+      setFriendSign('你好，我想添加你为好友')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '发送好友申请失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submitGroup() {
+    const name = groupName.trim()
+    if (!name) {
+      setError('请输入群组名称')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      await api.createGroup(session.sessionId, name)
+      setDialog(null)
+      setGroupName('')
+      await onRefreshDirectory()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '创建群组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleRequest(requestId: EntityId, action: 'accept' | 'reject') {
+    if (session.demo) {
+      setRequests((current) => current.map((item) => item.id === requestId ? { ...item, status: action === 'accept' ? 'accepted' : 'rejected' } : item))
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      const response = await api.handleFriendRequest(session.sessionId, requestId, action)
+      setRequests((current) => current.map((item) => item.id === requestId ? friendRequestToViewModel(response.request) : item))
+      if (action === 'accept') await onRefreshDirectory()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '处理好友申请失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function closeDialog() {
+    if (busy) return
+    setDialog(null)
+    setError('')
+  }
+
   if (section === 'settings') return <section className="page-panel"><header><h1>设置</h1><p>管理客户端偏好与服务连接</p></header><div className="settings-card"><h3>账号</h3><div className="account-row"><Avatar initials={session.username[0]} color="#607be8" size="lg" /><div><strong>{session.username}</strong><span>用户 ID：{session.userId}</span><em>{session.demo ? '演示模式' : '已连接服务'}</em></div></div></div><div className="settings-card"><h3>连接</h3><label>API 服务地址<input value={server} onChange={(event) => setServer(event.target.value)} /></label><label>Call 服务地址<input value={callServer} onChange={(event) => setCallServer(event.target.value)} /></label><label>Call WebSocket 地址<input value={callWs} onChange={(event) => setCallWs(event.target.value)} /></label><label>Media 服务地址<input value={mediaServer} onChange={(event) => setMediaServer(event.target.value)} /></label><button className="primary-button" onClick={() => { localStorage.setItem('mochat.server', server); localStorage.setItem('mochat.callServer', callServer); localStorage.setItem('mochat.callWs', callWs); localStorage.setItem('mochat.mediaServer', mediaServer) }}>保存配置</button></div><div className="settings-card toggle-row"><div><h3>桌面通知</h3><p>收到新消息时显示系统通知</p></div><button className={`toggle ${notifications ? 'on' : ''}`} onClick={() => setNotifications(!notifications)}><i /></button></div></section>
-  if (section === 'requests') return <section className="page-panel"><header><h1>新的朋友</h1><p>{requests.filter((item) => item.status === 'pending').length} 个待处理申请</p></header><div className="directory-list">{requests.map((request) => <div className="request-row" key={request.id}><Avatar initials={request.name[0]} color={request.id === 1 ? '#7b69d9' : '#3a9d89'} /><div><strong>{request.name}</strong><span>{request.message}</span><small>用户 ID：{request.userId}</small></div>{request.status === 'pending' ? <div className="request-actions"><button onClick={() => setRequests(requests.map((item) => item.id === request.id ? { ...item, status: 'rejected' } : item))}>忽略</button><button className="primary-button" onClick={() => setRequests(requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' } : item))}>接受</button></div> : <em>{request.status === 'accepted' ? '已添加' : '已忽略'}</em>}</div>)}</div></section>
+  if (section === 'requests') return <section className="page-panel"><header><h1>新的朋友</h1><p>{requests.filter((item) => item.status === 'pending').length} 个待处理申请</p></header>{error && <div className="page-error">{error}</div>}<div className="directory-list">{requests.length === 0 ? <EmptyState icon={<UserPlus />} title="暂无好友申请" text="收到新的好友申请后会显示在这里" /> : requests.map((request) => <div className="request-row" key={request.id}><Avatar initials={request.name[0]} color={colorFor(request.userId)} /><div><strong>{request.name}</strong><span>{request.message}</span><small>用户 ID：{request.userId}</small></div>{request.status === 'pending' ? <div className="request-actions"><button disabled={busy} onClick={() => handleRequest(request.id, 'reject')}>忽略</button><button className="primary-button" disabled={busy} onClick={() => handleRequest(request.id, 'accept')}>接受</button></div> : <em>{request.status === 'accepted' ? '已添加' : '已忽略'}</em>}</div>)}</div></section>
   const isGroup = section === 'groups'
   const source = conversations.filter((item) => isGroup ? item.kind === 'group' : item.kind === 'private')
-  return <section className="page-panel"><header><div><h1>{isGroup ? '群组' : '联系人'}</h1><p>{source.length} {isGroup ? '个群聊' : '位联系人'}</p></div><button className="primary-button"><Plus />{isGroup ? '创建群组' : '添加好友'}</button></header><div className="directory-list">{source.length === 0 ? <EmptyState icon={isGroup ? <Users /> : <ContactRound />} title={isGroup ? '暂无群组' : '暂无联系人'} text={session.demo ? '演示数据为空' : '后端当前没有返回数据'} /> : source.map((item) => <div className="directory-row" key={item.id}><Avatar initials={item.initials} color={item.color} online={item.online} /><div><strong>{item.name}</strong><span>{isGroup ? `${item.targetId} · 群组` : `用户 ID：${item.targetId}`}</span></div><button className="ghost-button"><MessageSquare />发消息</button><button className="icon-button"><MoreVertical /></button></div>)}</div></section>
+  return <section className="page-panel"><header><div><h1>{isGroup ? '群组' : '联系人'}</h1><p>{source.length} {isGroup ? '个群聊' : '位联系人'}</p></div><button className="primary-button" onClick={() => { setError(''); setDialog(isGroup ? 'group' : 'friend') }}><Plus />{isGroup ? '创建群组' : '添加好友'}</button></header>{error && <div className="page-error">{error}</div>}<div className="directory-list">{source.length === 0 ? <EmptyState icon={isGroup ? <Users /> : <ContactRound />} title={isGroup ? '暂无群组' : '暂无联系人'} text={session.demo ? '演示数据为空' : '后端当前没有返回数据'} /> : source.map((item) => <div className="directory-row" key={item.id}><Avatar initials={item.initials} color={item.color} online={item.online} /><div><strong>{item.name}</strong><span>{isGroup ? `${item.targetId} · 群组` : `用户 ID：${item.targetId}`}</span></div><button className="ghost-button" onClick={() => onOpenConversation(item.id)}><MessageSquare />发消息</button><button className="icon-button"><MoreVertical /></button></div>)}</div>{dialog === 'friend' && <Modal title="添加好友" onClose={closeDialog} footer={<><button className="ghost-button" disabled={busy} onClick={closeDialog}>取消</button><button className="primary-button" disabled={busy} onClick={submitFriendRequest}>{busy ? '发送中…' : '发送申请'}</button></>}>
+    <div className="modal-form">
+      <label>用户 ID<input value={friendUserId} onChange={(event) => setFriendUserId(event.target.value)} placeholder="输入对方用户 ID" autoFocus /></label>
+      <label>验证消息<input value={friendSign} onChange={(event) => setFriendSign(event.target.value)} placeholder="给对方看的备注" /></label>
+      {error && <div className="form-error">{error}</div>}
+    </div>
+  </Modal>}{dialog === 'group' && <Modal title="创建群组" onClose={closeDialog} footer={<><button className="ghost-button" disabled={busy} onClick={closeDialog}>取消</button><button className="primary-button" disabled={busy} onClick={submitGroup}>{busy ? '创建中…' : '创建'}</button></>}>
+    <div className="modal-form">
+      <label>群组名称<input value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="例如：项目联调群" autoFocus /></label>
+      {error && <div className="form-error">{error}</div>}
+    </div>
+  </Modal>}</section>
 }
 
 function CallModal({ session, conversation, kind, onClose }: { session: Session; conversation: Conversation; kind: 'voice' | 'video'; onClose: () => void }) {
@@ -250,47 +373,47 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
 function MainApp({ session, onLogout }: { session: Session; onLogout: () => void }) {
   const [section, setSection] = useState<Section>('chats')
   const [conversations, setConversations] = useState<Conversation[]>(session.demo ? seedConversations : [])
-  const [selected, setSelected] = useState<number | null>(session.demo ? seedConversations[0]?.id ?? null : null)
+  const [selected, setSelected] = useState<EntityId | null>(session.demo ? seedConversations[0]?.id ?? null : null)
   const [messages, setMessages] = useState<ChatMessage[]>(session.demo ? initialMessages : [])
   const [directoryLoading, setDirectoryLoading] = useState(false)
   const [directoryError, setDirectoryError] = useState('')
   const [call, setCall] = useState<'voice' | 'video' | null>(null)
   const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
+  const loadDirectory = useCallback(async (cancelled?: () => boolean) => {
+    setDirectoryLoading(true)
+    setDirectoryError('')
+    try {
+      const [friendsResponse, groupsResponse] = await Promise.all([
+        api.friends(session.sessionId),
+        api.groups(session.sessionId),
+      ])
+      if (cancelled?.()) return
+      const remoteConversations = [
+        ...(friendsResponse.friends ?? []).map(friendToConversation),
+        ...(groupsResponse.groups ?? []).map(groupToConversation),
+      ]
+      setConversations(remoteConversations)
+      setSelected((current) => remoteConversations.some((item) => item.id === current) ? current : remoteConversations[0]?.id ?? null)
+      setMessages([])
+    } catch (reason) {
+      if (cancelled?.()) return
+      setConversations([])
+      setSelected(null)
+      setMessages([])
+      setDirectoryError(reason instanceof Error ? reason.message : '加载通讯录失败')
+    } finally {
+      if (!cancelled?.()) setDirectoryLoading(false)
+    }
+  }, [session.sessionId])
   useEffect(() => {
     if (session.demo) return
     let cancelled = false
-    async function loadDirectory() {
-      setDirectoryLoading(true)
-      setDirectoryError('')
-      try {
-        const [friendsResponse, groupsResponse] = await Promise.all([
-          api.friends(session.sessionId),
-          api.groups(session.sessionId),
-        ])
-        if (cancelled) return
-        const remoteConversations = [
-          ...(friendsResponse.friends ?? []).map(friendToConversation),
-          ...(groupsResponse.groups ?? []).map(groupToConversation),
-        ]
-        setConversations(remoteConversations)
-        setSelected(remoteConversations[0]?.id ?? null)
-        setMessages([])
-      } catch (reason) {
-        if (cancelled) return
-        setConversations([])
-        setSelected(null)
-        setMessages([])
-        setDirectoryError(reason instanceof Error ? reason.message : '加载通讯录失败')
-      } finally {
-        if (!cancelled) setDirectoryLoading(false)
-      }
-    }
-    loadDirectory()
+    Promise.resolve().then(() => loadDirectory(() => cancelled))
     return () => {
       cancelled = true
     }
-  }, [session.demo, session.sessionId])
+  }, [loadDirectory, session.demo])
   useEffect(() => {
     if (session.demo) return
     const socket = signaling.connect(session.sessionId, (payload) => {
@@ -315,7 +438,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   return <main className="app-shell">
     <WindowControls />
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
-    {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} />}
+    {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
     <div className={`connection-pill ${session.demo ? 'demo' : ''}`}>{session.demo ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : '服务已连接'}<ChevronDown /></div>
     {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
   </main>

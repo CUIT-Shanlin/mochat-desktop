@@ -1,4 +1,4 @@
-import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendTextMessage, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
+import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendGroupJoinRequest, BackendTextMessage, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
 
 const demoEnabled = import.meta.env.VITE_DEMO_MODE !== 'false'
 const testIdentityKeys: Record<string, string> = {
@@ -104,6 +104,9 @@ export const api = {
     })
   },
   createGroup: (sessionId: string, name: string) => apiRequest<{ group: BackendGroup }>('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
+  sendGroupJoinRequest: (sessionId: string, groupId: EntityId, sign = '') => apiRequest<{ request: BackendGroupJoinRequest }>(`/groups/${groupId}/join-requests`, { method: 'POST', body: JSON.stringify({ sessionId, sign }) }),
+  groupJoinRequests: (sessionId: string, groupId: EntityId) => apiRequest<{ requests?: BackendGroupJoinRequest[] }>(`/groups/${groupId}/join-requests?sessionId=${encodeURIComponent(sessionId)}`),
+  handleGroupJoinRequest: (sessionId: string, groupId: EntityId, requestId: EntityId, action: 'accept' | 'reject') => apiRequest<{ request: BackendGroupJoinRequest }>(`/groups/${groupId}/join-requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),
   sendFriendRequest: (sessionId: string, toUserId: EntityId, sign = '') => apiRequest<{ request: BackendFriendRequest }>('/friends/requests', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, sign }) }),
   receivedFriendRequests: (sessionId: string) => apiRequest<{ requests?: BackendFriendRequest[] }>(`/friends/requests/received?sessionId=${encodeURIComponent(sessionId)}`),
   handleFriendRequest: (sessionId: string, requestId: EntityId, action: 'accept' | 'reject') => apiRequest<{ request: BackendFriendRequest }>(`/friends/requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),

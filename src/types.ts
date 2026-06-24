@@ -20,6 +20,7 @@ export interface Conversation {
   time: string
   unread: number
   online?: boolean
+  ownerUserId?: EntityId
 }
 
 export interface BackendFriend {
@@ -41,6 +42,17 @@ export interface BackendFriendRequest {
   sign: string
   status: 'pending' | 'accepted' | 'rejected' | 'cancelled'
   createdAtEpochMillis: number
+  handledAtEpochMillis?: number | null
+}
+
+export interface BackendGroupJoinRequest {
+  requestId: EntityId
+  groupId: EntityId
+  fromUserId: EntityId
+  sign: string
+  status: 'pending' | 'accepted' | 'rejected' | 'cancelled'
+  createdAtEpochMillis: number
+  handledByUserId?: EntityId | null
   handledAtEpochMillis?: number | null
 }
 
@@ -108,4 +120,12 @@ export interface CallSignalPayload {
   livekitUrl?: string
   timestampMillis?: number
   message?: string
+}
+
+export interface IncomingCall {
+  type: 'call_invite' | 'call_group_started'
+  callId?: string
+  fromUserId: EntityId
+  groupId?: EntityId
+  roomName: string
 }

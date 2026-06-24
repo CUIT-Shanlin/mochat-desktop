@@ -9,7 +9,7 @@ import './App.css'
 import { CallSignaling, api, getApiBaseUrl, getCallBaseUrl, getCallWsUrl, getMediaBaseUrl } from './api'
 import { Avatar, EmptyState, Logo, Modal } from './components'
 import { conversations as seedConversations, friendRequests, initialMessages } from './data'
-import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendTextMessage, CallSession, ChatMessage, Conversation, EntityId, FriendRequest, Session } from './types'
+import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendGroupJoinRequest, BackendTextMessage, CallSession, ChatMessage, Conversation, EntityId, FriendRequest, IncomingCall, Session } from './types'
 
 type Section = 'chats' | 'contacts' | 'groups' | 'requests' | 'settings'
 
@@ -52,6 +52,17 @@ function groupToConversation(group: BackendGroup): Conversation {
     preview: '暂无消息',
     time: '',
     unread: 0,
+    ownerUserId: group.ownerUserId,
+  }
+}
+
+function groupJoinRequestToViewModel(request: BackendGroupJoinRequest): FriendRequest {
+  return {
+    id: request.requestId,
+    name: `用户 ${request.fromUserId}`,
+    userId: request.fromUserId,
+    message: request.sign || '申请加入群聊',
+    status: request.status === 'accepted' ? 'accepted' : request.status === 'rejected' ? 'rejected' : 'pending',
   }
 }
 
@@ -224,10 +235,14 @@ function Directory({
   const [callWs, setCallWs] = useState(getCallWsUrl())
   const [mediaServer, setMediaServer] = useState(getMediaBaseUrl())
   const [notifications, setNotifications] = useState(true)
-  const [dialog, setDialog] = useState<'friend' | 'group' | null>(null)
+  const [dialog, setDialog] = useState<'friend' | 'group' | 'joinGroup' | 'groupRequests' | null>(null)
   const [friendUserId, setFriendUserId] = useState('')
   const [friendSign, setFriendSign] = useState('你好，我想添加你为好友')
   const [groupName, setGroupName] = useState('')
+  const [joinGroupId, setJoinGroupId] = useState('')
+  const [joinGroupSign, setJoinGroupSign] = useState('你好，我想加入群聊')
+  const [manageGroup, setManageGroup] = useState<Conversation | null>(null)
+  const [groupJoinRequests, setGroupJoinRequests] = useState<FriendRequest[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -289,6 +304,57 @@ function Directory({
     }
   }
 
+  async function submitJoinGroup() {
+    const groupId = joinGroupId.trim()
+    if (!/^\d+$/.test(groupId)) {
+      setError('请输入正确的群 ID')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      await api.sendGroupJoinRequest(session.sessionId, groupId, joinGroupSign.trim())
+      setDialog(null)
+      setJoinGroupId('')
+      setJoinGroupSign('你好，我想加入群聊')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '发送入群申请失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function openGroupRequests(group: Conversation) {
+    setManageGroup(group)
+    setDialog('groupRequests')
+    setError('')
+    setBusy(true)
+    try {
+      const response = await api.groupJoinRequests(session.sessionId, group.targetId)
+      setGroupJoinRequests((response.requests ?? []).map(groupJoinRequestToViewModel))
+    } catch (reason) {
+      setGroupJoinRequests([])
+      setError(reason instanceof Error ? reason.message : '加载入群申请失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleGroupJoinRequest(requestId: EntityId, action: 'accept' | 'reject') {
+    if (!manageGroup) return
+    setBusy(true)
+    setError('')
+    try {
+      const response = await api.handleGroupJoinRequest(session.sessionId, manageGroup.targetId, requestId, action)
+      setGroupJoinRequests((current) => current.map((item) => item.id === requestId ? groupJoinRequestToViewModel(response.request) : item))
+      if (action === 'accept') await onRefreshDirectory()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '处理入群申请失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function handleRequest(requestId: EntityId, action: 'accept' | 'reject') {
     if (session.demo) {
       setRequests((current) => current.map((item) => item.id === requestId ? { ...item, status: action === 'accept' ? 'accepted' : 'rejected' } : item))
@@ -310,6 +376,7 @@ function Directory({
   function closeDialog() {
     if (busy) return
     setDialog(null)
+    setManageGroup(null)
     setError('')
   }
 
@@ -317,7 +384,7 @@ function Directory({
   if (section === 'requests') return <section className="page-panel"><header><h1>新的朋友</h1><p>{requests.filter((item) => item.status === 'pending').length} 个待处理申请</p></header>{error && <div className="page-error">{error}</div>}<div className="directory-list">{requests.length === 0 ? <EmptyState icon={<UserPlus />} title="暂无好友申请" text="收到新的好友申请后会显示在这里" /> : requests.map((request) => <div className="request-row" key={request.id}><Avatar initials={request.name[0]} color={colorFor(request.userId)} /><div><strong>{request.name}</strong><span>{request.message}</span><small>用户 ID：{request.userId}</small></div>{request.status === 'pending' ? <div className="request-actions"><button disabled={busy} onClick={() => handleRequest(request.id, 'reject')}>忽略</button><button className="primary-button" disabled={busy} onClick={() => handleRequest(request.id, 'accept')}>接受</button></div> : <em>{request.status === 'accepted' ? '已添加' : '已忽略'}</em>}</div>)}</div></section>
   const isGroup = section === 'groups'
   const source = conversations.filter((item) => isGroup ? item.kind === 'group' : item.kind === 'private')
-  return <section className="page-panel"><header><div><h1>{isGroup ? '群组' : '联系人'}</h1><p>{source.length} {isGroup ? '个群聊' : '位联系人'}</p></div><button className="primary-button" onClick={() => { setError(''); setDialog(isGroup ? 'group' : 'friend') }}><Plus />{isGroup ? '创建群组' : '添加好友'}</button></header>{error && <div className="page-error">{error}</div>}<div className="directory-list">{source.length === 0 ? <EmptyState icon={isGroup ? <Users /> : <ContactRound />} title={isGroup ? '暂无群组' : '暂无联系人'} text={session.demo ? '演示数据为空' : '后端当前没有返回数据'} /> : source.map((item) => <div className="directory-row" key={item.id}><Avatar initials={item.initials} color={item.color} online={item.online} /><div><strong>{item.name}</strong><span>{isGroup ? `${item.targetId} · 群组` : `用户 ID：${item.targetId}`}</span></div><button className="ghost-button" onClick={() => onOpenConversation(item.id)}><MessageSquare />发消息</button><button className="icon-button"><MoreVertical /></button></div>)}</div>{dialog === 'friend' && <Modal title="添加好友" onClose={closeDialog} footer={<><button className="ghost-button" disabled={busy} onClick={closeDialog}>取消</button><button className="primary-button" disabled={busy} onClick={submitFriendRequest}>{busy ? '发送中…' : '发送申请'}</button></>}>
+  return <section className="page-panel"><header><div><h1>{isGroup ? '群组' : '联系人'}</h1><p>{source.length} {isGroup ? '个群聊' : '位联系人'}</p></div><div className="header-actions">{isGroup && <button className="ghost-button" onClick={() => { setError(''); setDialog('joinGroup') }}><UserPlus />加入群聊</button>}<button className="primary-button" onClick={() => { setError(''); setDialog(isGroup ? 'group' : 'friend') }}><Plus />{isGroup ? '创建群组' : '添加好友'}</button></div></header>{error && <div className="page-error">{error}</div>}<div className="directory-list">{source.length === 0 ? <EmptyState icon={isGroup ? <Users /> : <ContactRound />} title={isGroup ? '暂无群组' : '暂无联系人'} text={session.demo ? '演示数据为空' : '后端当前没有返回数据'} /> : source.map((item) => <div className="directory-row" key={item.id}><Avatar initials={item.initials} color={item.color} online={item.online} /><div><strong>{item.name}</strong><span>{isGroup ? `${item.targetId} · 群组` : `用户 ID：${item.targetId}`}</span></div><button className="ghost-button" onClick={() => onOpenConversation(item.id)}><MessageSquare />发消息</button>{isGroup && String(item.ownerUserId) === String(session.userId) ? <button className="ghost-button" onClick={() => openGroupRequests(item)}><UserPlus />入群申请</button> : <button className="icon-button"><MoreVertical /></button>}</div>)}</div>{dialog === 'friend' && <Modal title="添加好友" onClose={closeDialog} footer={<><button className="ghost-button" disabled={busy} onClick={closeDialog}>取消</button><button className="primary-button" disabled={busy} onClick={submitFriendRequest}>{busy ? '发送中…' : '发送申请'}</button></>}>
     <div className="modal-form">
       <label>用户 ID<input value={friendUserId} onChange={(event) => setFriendUserId(event.target.value)} placeholder="输入对方用户 ID" autoFocus /></label>
       <label>验证消息<input value={friendSign} onChange={(event) => setFriendSign(event.target.value)} placeholder="给对方看的备注" /></label>
@@ -328,7 +395,28 @@ function Directory({
       <label>群组名称<input value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="例如：项目联调群" autoFocus /></label>
       {error && <div className="form-error">{error}</div>}
     </div>
+  </Modal>}{dialog === 'joinGroup' && <Modal title="加入群聊" onClose={closeDialog} footer={<><button className="ghost-button" disabled={busy} onClick={closeDialog}>取消</button><button className="primary-button" disabled={busy} onClick={submitJoinGroup}>{busy ? '发送中…' : '发送申请'}</button></>}>
+    <div className="modal-form">
+      <label>群 ID<input value={joinGroupId} onChange={(event) => setJoinGroupId(event.target.value)} placeholder="输入要加入的群 ID" autoFocus /></label>
+      <label>验证消息<input value={joinGroupSign} onChange={(event) => setJoinGroupSign(event.target.value)} placeholder="给群主看的备注" /></label>
+      {error && <div className="form-error">{error}</div>}
+    </div>
+  </Modal>}{dialog === 'groupRequests' && <Modal title={`${manageGroup?.name ?? '群聊'} · 入群申请`} onClose={closeDialog} footer={<button className="ghost-button" disabled={busy} onClick={closeDialog}>关闭</button>}>
+    <div className="modal-form">
+      {error && <div className="form-error">{error}</div>}
+      {groupJoinRequests.length === 0 ? <p>暂无待处理入群申请</p> : groupJoinRequests.map((request) => <div className="request-row" key={request.id}><Avatar initials={request.name[0]} color={colorFor(request.userId)} /><div><strong>{request.name}</strong><span>{request.message}</span><small>用户 ID：{request.userId}</small></div>{request.status === 'pending' ? <div className="request-actions"><button disabled={busy} onClick={() => handleGroupJoinRequest(request.id, 'reject')}>拒绝</button><button className="primary-button" disabled={busy} onClick={() => handleGroupJoinRequest(request.id, 'accept')}>接受</button></div> : <em>{request.status === 'accepted' ? '已通过' : '已拒绝'}</em>}</div>)}
+    </div>
   </Modal>}</section>
+}
+
+async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUrl'>, kind: 'voice' | 'video') {
+  if (!result.token || !result.livekitUrl) throw new Error('通话令牌未返回')
+  const { Room } = await import('livekit-client')
+  const livekitRoom = new Room()
+  await livekitRoom.connect(result.livekitUrl, result.token)
+  await livekitRoom.localParticipant.setMicrophoneEnabled(true)
+  if (kind === 'video') await livekitRoom.localParticipant.setCameraEnabled(true)
+  return livekitRoom
 }
 
 function CallModal({ session, conversation, kind, onClose }: { session: Session; conversation: Conversation; kind: 'voice' | 'video'; onClose: () => void }) {
@@ -351,16 +439,12 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
           return
         }
         setStatus('正在连接 LiveKit 房间…')
-        const { Room } = await import('livekit-client')
-        const livekitRoom = new Room()
+        const livekitRoom = await connectLiveKitRoom(result, kind)
         activeRoom = livekitRoom
-        await livekitRoom.connect(result.livekitUrl, result.token)
         if (cancelled) {
           livekitRoom.disconnect()
           return
         }
-        await livekitRoom.localParticipant.setMicrophoneEnabled(true)
-        if (kind === 'video') await livekitRoom.localParticipant.setCameraEnabled(true)
         setRoom(livekitRoom)
         setStatus(kind === 'video' ? '视频通话已连接' : '语音通话已连接')
       } catch (reason) {
@@ -385,6 +469,86 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
   return <div className="call-backdrop"><section className="call-card"><div className="call-pulse"><Avatar initials={conversation.initials} color={conversation.color} size="lg" /></div><h2>{conversation.name}</h2><p>{kind === 'video' ? '正在发起视频通话…' : '正在发起语音通话…'}</p><div className="call-status"><Wifi />{status}</div>{callSession?.roomName && <div className="call-room">房间：{callSession.roomName}</div>}<div className="call-buttons"><button title="扬声器"><Volume2 /></button><button title="麦克风"><Mic /></button><button className="hangup" onClick={hangup} title="挂断"><Phone /></button></div></section></div>
 }
 
+function IncomingCallModal({
+  session,
+  incoming,
+  signaling,
+  connectedSession,
+  onConnectedConsumed,
+  onClose,
+}: {
+  session: Session
+  incoming: IncomingCall
+  signaling: CallSignaling
+  connectedSession: CallSession | null
+  onConnectedConsumed: () => void
+  onClose: () => void
+}) {
+  const [status, setStatus] = useState('收到通话邀请')
+  const [room, setRoom] = useState<Room | null>(null)
+  const [accepting, setAccepting] = useState(false)
+
+  useEffect(() => {
+    if (!connectedSession || connectedSession.roomName !== incoming.roomName || room) return
+    const sessionToConnect = connectedSession
+    let cancelled = false
+    async function connectAcceptedPrivateCall() {
+      try {
+        setStatus('正在连接 LiveKit 房间…')
+        const livekitRoom = await connectLiveKitRoom(sessionToConnect, 'voice')
+        if (cancelled) {
+          livekitRoom.disconnect()
+          return
+        }
+        setRoom(livekitRoom)
+        setStatus('语音通话已连接')
+        onConnectedConsumed()
+      } catch (reason) {
+        setStatus(reason instanceof Error ? reason.message : '通话服务连接失败')
+      }
+    }
+    connectAcceptedPrivateCall()
+    return () => {
+      cancelled = true
+    }
+  }, [connectedSession, incoming.roomName, onConnectedConsumed, room])
+
+  async function accept() {
+    setAccepting(true)
+    setStatus('正在接听…')
+    try {
+      if (incoming.type === 'call_group_started') {
+        const result = await api.joinGroupCall(session.sessionId, incoming.roomName)
+        setStatus('正在连接 LiveKit 房间…')
+        const livekitRoom = await connectLiveKitRoom(result, 'voice')
+        setRoom(livekitRoom)
+        setStatus('语音通话已连接')
+        return
+      }
+      signaling.send({
+        fromUserId: session.userId,
+        toUserId: incoming.fromUserId,
+        type: 'call_accept',
+        roomName: incoming.roomName,
+      })
+      setStatus('已接听，正在等待通话令牌…')
+    } catch (reason) {
+      setStatus(reason instanceof Error ? reason.message : '接听失败')
+      setAccepting(false)
+    }
+  }
+
+  async function close() {
+    if (room && incoming.type === 'call_group_started') {
+      await api.leaveGroupCall(session.sessionId, incoming.roomName).catch(() => undefined)
+    }
+    room?.disconnect()
+    onClose()
+  }
+
+  return <div className="call-backdrop"><section className="call-card"><div className="call-pulse"><Avatar initials={incoming.type === 'call_group_started' ? '群' : '来'} color="#d48758" size="lg" /></div><h2>{incoming.type === 'call_group_started' ? `群聊 ${incoming.groupId}` : `用户 ${incoming.fromUserId}`}</h2><p>邀请你进行语音通话</p><div className="call-status"><Wifi />{status}</div><div className="call-room">房间：{incoming.roomName}</div><div className="call-buttons">{!room && <button className="primary-button" disabled={accepting} onClick={accept} title="接听"><Phone /></button>}<button className="hangup" onClick={close} title={room ? '挂断' : '拒绝'}><Phone /></button></div></section></div>
+}
+
 function MainApp({ session, onLogout }: { session: Session; onLogout: () => void }) {
   const [section, setSection] = useState<Section>('chats')
   const [conversations, setConversations] = useState<Conversation[]>(session.demo ? seedConversations : [])
@@ -393,6 +557,8 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [directoryLoading, setDirectoryLoading] = useState(false)
   const [directoryError, setDirectoryError] = useState('')
   const [call, setCall] = useState<'voice' | 'video' | null>(null)
+  const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null)
+  const [connectedIncomingCall, setConnectedIncomingCall] = useState<CallSession | null>(null)
   const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
   const refreshConversationPreview = useCallback((conversationId: EntityId, latest?: ChatMessage) => {
@@ -449,6 +615,18 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   useEffect(() => {
     if (session.demo) return
     const socket = signaling.connect(session.sessionId, (payload) => {
+      if (payload.type === 'call_invite' && payload.fromUserId && payload.roomName) {
+        setIncomingCall({ type: 'call_invite', callId: payload.callId, fromUserId: payload.fromUserId, roomName: payload.roomName })
+        return
+      }
+      if (payload.type === 'call_group_started' && payload.fromUserId && payload.groupId && payload.roomName) {
+        setIncomingCall({ type: 'call_group_started', callId: payload.callId, fromUserId: payload.fromUserId, groupId: payload.groupId, roomName: payload.roomName })
+        return
+      }
+      if (payload.type === 'call_accepted_with_token' && payload.roomName && payload.token && payload.livekitUrl) {
+        setConnectedIncomingCall({ roomName: payload.roomName, token: payload.token, livekitUrl: payload.livekitUrl })
+        return
+      }
       if (payload.type?.startsWith('call_')) console.info('MoChat call signal', payload)
     })
     socket.onerror = () => console.warn('MoChat call signaling disconnected')
@@ -502,6 +680,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
     <div className={`connection-pill ${session.demo ? 'demo' : ''}`}>{session.demo ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : '服务已连接'}<ChevronDown /></div>
     {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
+    {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} signaling={signaling} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
   </main>
 }
 

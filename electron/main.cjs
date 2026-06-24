@@ -6,11 +6,32 @@ const path = require('node:path')
 const isDev = !app.isPackaged
 const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
 
-function launchTestWindow() {
+function encodeLaunchConfig(config) {
+  return Buffer.from(JSON.stringify(config), 'utf8').toString('base64url')
+}
+
+async function readConnectionConfig() {
+  const window = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0]
+  if (!window) return {}
+  try {
+    return await window.webContents.executeJavaScript(`({
+      server: localStorage.getItem('mochat.server'),
+      callServer: localStorage.getItem('mochat.callServer'),
+      callWs: localStorage.getItem('mochat.callWs'),
+      mediaServer: localStorage.getItem('mochat.mediaServer'),
+    })`, true)
+  } catch {
+    return {}
+  }
+}
+
+async function launchTestWindow() {
   const userDataDir = path.join(os.tmpdir(), `mochat-test-${Date.now()}`)
+  const config = await readConnectionConfig()
+  const launchConfigArg = `--mochat-config=${encodeLaunchConfig(config)}`
   const args = isDev
-    ? [app.getAppPath(), `--user-data-dir=${userDataDir}`, '--mochat-test-window']
-    : [`--user-data-dir=${userDataDir}`, '--mochat-test-window']
+    ? [app.getAppPath(), `--user-data-dir=${userDataDir}`, '--mochat-test-window', launchConfigArg]
+    : [`--user-data-dir=${userDataDir}`, '--mochat-test-window', launchConfigArg]
 
   const child = spawn(process.execPath, args, {
     detached: true,

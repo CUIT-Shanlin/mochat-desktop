@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import type { Room } from 'livekit-client'
 import './App.css'
-import { CallSignaling, api, getCallWsUrl } from './api'
+import { CallSignaling, api, getApiBaseUrl, getCallBaseUrl, getCallWsUrl, getMediaBaseUrl } from './api'
 import { Avatar, EmptyState, Logo, Modal } from './components'
 import { conversations as seedConversations, friendRequests, initialMessages } from './data'
 import type { BackendFriend, BackendFriendRequest, BackendGroup, CallSession, ChatMessage, Conversation, EntityId, FriendRequest, Session } from './types'
@@ -204,10 +204,10 @@ function Directory({
   onOpenConversation: (conversationId: EntityId) => void
 }) {
   const [requests, setRequests] = useState<FriendRequest[]>(session.demo ? friendRequests : [])
-  const [server, setServer] = useState(localStorage.getItem('mochat.server') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080')
-  const [callServer, setCallServer] = useState(localStorage.getItem('mochat.callServer') || import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090')
-  const [callWs, setCallWs] = useState(localStorage.getItem('mochat.callWs') || import.meta.env.VITE_CALL_WS_URL || getCallWsUrl())
-  const [mediaServer, setMediaServer] = useState(localStorage.getItem('mochat.mediaServer') || import.meta.env.VITE_MEDIA_BASE_URL || 'http://localhost:8083')
+  const [server, setServer] = useState(getApiBaseUrl())
+  const [callServer, setCallServer] = useState(getCallBaseUrl())
+  const [callWs, setCallWs] = useState(getCallWsUrl())
+  const [mediaServer, setMediaServer] = useState(getMediaBaseUrl())
   const [notifications, setNotifications] = useState(true)
   const [dialog, setDialog] = useState<'friend' | 'group' | null>(null)
   const [friendUserId, setFriendUserId] = useState('')

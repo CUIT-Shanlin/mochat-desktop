@@ -22,19 +22,24 @@ describe('MoChat API client', () => {
   })
 
   it('falls back to a demo session when the backend is unavailable', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: false,
-      json: () => Promise.resolve({ message: 'offline' }),
-    }))
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
     const session = await api.login('alice')
     expect(session.username).toBe('alice')
     expect(session.demo).toBe(true)
   })
 
+  it('does not fall back to demo mode for backend validation errors', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      text: () => Promise.resolve(JSON.stringify({ message: 'publicKey does not match persisted identity key' })),
+    }))
+    await expect(api.login('alice')).rejects.toThrow('publicKey does not match persisted identity key')
+  })
+
   it('keeps a stable 32-byte identity key per username', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: () => Promise.resolve({ userId: 7, username: 'alice', sessionId: 'session-7' }),
+      text: () => Promise.resolve(JSON.stringify({ userId: 7, username: 'alice', sessionId: 'session-7' })),
     })
     vi.stubGlobal('fetch', fetchMock)
     await api.login('alice')

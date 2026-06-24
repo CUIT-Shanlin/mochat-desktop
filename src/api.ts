@@ -1,22 +1,31 @@
 import type { BackendFriend, BackendFriendRequest, BackendGroup, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
 
 const demoEnabled = import.meta.env.VITE_DEMO_MODE !== 'false'
+const testIdentityKeys: Record<string, string> = {
+  mochat_alice: 'egVLD9Zpd4lMjPqqrJAlz6SewBAtGsQetX5FMOryBYA=',
+  mochat_bob: 'rz+yFQsoNPBC9L8bmGQSyyrsVYYsztR3zYeMVlkDBkU=',
+  mochat_carol: '1EFmIYZ7LMN10Je/6qouv6sMY/SoiXVdK8QmcwFpHEw=',
+}
+
+function configuredValue(key: 'server' | 'callServer' | 'callWs' | 'mediaServer', storageKey: string, fallback?: string) {
+  return localStorage.getItem(storageKey) || window.mochatDesktop?.launchConfig?.[key] || fallback || ''
+}
 
 export function getApiBaseUrl() {
-  return (localStorage.getItem('mochat.server') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080').replace(/\/$/, '')
+  return configuredValue('server', 'mochat.server', import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080').replace(/\/$/, '')
 }
 
 export function getCallBaseUrl() {
-  return (localStorage.getItem('mochat.callServer') || import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090').replace(/\/$/, '')
+  return configuredValue('callServer', 'mochat.callServer', import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090').replace(/\/$/, '')
 }
 
 export function getCallWsUrl() {
-  const configured = localStorage.getItem('mochat.callWs') || import.meta.env.VITE_CALL_WS_URL
+  const configured = configuredValue('callWs', 'mochat.callWs', import.meta.env.VITE_CALL_WS_URL)
   return (configured || getCallBaseUrl().replace(/^http/, 'ws')).replace(/\/$/, '')
 }
 
 export function getMediaBaseUrl() {
-  return (localStorage.getItem('mochat.mediaServer') || import.meta.env.VITE_MEDIA_BASE_URL || 'http://localhost:8083').replace(/\/$/, '')
+  return configuredValue('mediaServer', 'mochat.mediaServer', import.meta.env.VITE_MEDIA_BASE_URL || 'http://localhost:8083').replace(/\/$/, '')
 }
 
 async function request<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
@@ -51,6 +60,10 @@ function generatePublicKey(): string {
 
 function identityKeyFor(username: string) {
   const storageKey = `mochat.identityKey.${username}`
+  if (testIdentityKeys[username]) {
+    localStorage.setItem(storageKey, testIdentityKeys[username])
+    return testIdentityKeys[username]
+  }
   const existing = localStorage.getItem(storageKey)
   if (existing) return existing
   const publicKey = generatePublicKey()
@@ -68,6 +81,7 @@ export const api = {
       })
     } catch (error) {
       if (!demoEnabled) throw error
+      if (!(error instanceof TypeError)) throw error
       return { userId: 10001, username, sessionId: `demo-${crypto.randomUUID()}`, demo: true }
     }
   },

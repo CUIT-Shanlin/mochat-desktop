@@ -2,9 +2,13 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
 const { spawn } = require('node:child_process')
 const os = require('node:os')
 const path = require('node:path')
+const { pathToFileURL } = require('node:url')
 
 const isDev = !app.isPackaged
 const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
+const devRendererUrl = 'http://localhost:5173'
+const packagedRendererPath = path.join(__dirname, '..', 'build', 'renderer', 'index.html')
+const packagedRendererUrl = pathToFileURL(packagedRendererPath).toString()
 
 function encodeLaunchConfig(config) {
   return Buffer.from(JSON.stringify(config), 'utf8').toString('base64url')
@@ -108,13 +112,40 @@ function createWindow() {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
+  window.webContents.on('will-navigate', (event, url) => {
+    if (isRendererNavigation(url)) return
+    event.preventDefault()
+    loadRenderer(window)
+  })
+  window.webContents.on('did-navigate', (_event, url) => {
+    if (!isRendererNavigation(url)) loadRenderer(window)
+  })
+  window.webContents.on('did-fail-load', (_event, _errorCode, _errorDescription, validatedUrl, isMainFrame) => {
+    if (isMainFrame && !isRendererNavigation(validatedUrl)) loadRenderer(window)
+  })
   window.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(['media', 'camera', 'microphone'].includes(permission))
   })
 
-  if (isDev) window.loadURL('http://localhost:5173')
-  else window.loadFile(path.join(__dirname, '..', 'build', 'renderer', 'index.html'))
+  loadRenderer(window)
 }
+
+function isRendererNavigation(url) {
+  if (isDev) return url === devRendererUrl || url.startsWith(`${devRendererUrl}/`)
+  return url === packagedRendererUrl
+}
+
+function loadRenderer(window) {
+  if (isDev) {
+    if (window.webContents.getURL() !== devRendererUrl) window.loadURL(devRendererUrl)
+    return
+  }
+  if (window.webContents.getURL() !== packagedRendererUrl) window.loadFile(packagedRendererPath)
+}
+
+app.on('open-file', (event) => {
+  event.preventDefault()
+})
 
 ipcMain.handle('dialog:select-files', async () => {
   const result = await dialog.showOpenDialog({

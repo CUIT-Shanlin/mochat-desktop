@@ -3,7 +3,7 @@ export type EntityId = string | number
 export type ConversationKind = 'private' | 'group'
 
 export interface Session {
-  userId: number
+  userId: EntityId
   username: string
   sessionId: string
   demo?: boolean
@@ -45,7 +45,7 @@ export interface BackendFriendRequest {
 }
 
 export interface ChatMessage {
-  id: number
+  id: EntityId
   conversationId: EntityId
   fromMe: boolean
   text: string
@@ -53,6 +53,16 @@ export interface ChatMessage {
   status?: 'sending' | 'sent' | 'read' | 'failed'
   mediaUrl?: string
   fileName?: string
+}
+
+export interface BackendTextMessage {
+  seq: EntityId
+  msgId: EntityId
+  conversationId: EntityId
+  senderUserId: EntityId
+  serverTimeMs: number
+  text: string
+  messageType: 'text' | 'image' | 'video' | 'audio' | 'file'
 }
 
 export interface FriendRequest {

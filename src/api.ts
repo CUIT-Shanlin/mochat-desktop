@@ -1,4 +1,4 @@
-import type { BackendFriend, BackendFriendRequest, BackendGroup, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
+import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendTextMessage, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
 
 const demoEnabled = import.meta.env.VITE_DEMO_MODE !== 'false'
 const testIdentityKeys: Record<string, string> = {
@@ -88,6 +88,15 @@ export const api = {
   friends: (sessionId: string) => apiRequest<{ friends?: BackendFriend[] }>(`/friends?sessionId=${encodeURIComponent(sessionId)}`),
   groups: (sessionId: string) => apiRequest<{ groups?: BackendGroup[] }>(`/groups?sessionId=${encodeURIComponent(sessionId)}`),
   history: (sessionId: string, conversationId: EntityId) => apiRequest<{ items: unknown[] }>(`/history?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&limit=50`),
+  textMessages: (sessionId: string, conversationId: EntityId, afterSeq: EntityId = 0) =>
+    apiRequest<{ items?: BackendTextMessage[] }>(`/messages?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&afterSeq=${afterSeq}&limit=100`),
+  sendTextMessage(sessionId: string, conversation: Conversation, text: string) {
+    const path = conversation.kind === 'group' ? '/messages/send-text/group' : '/messages/send-text/private'
+    return apiRequest<{ message: BackendTextMessage }>(path, {
+      method: 'POST',
+      body: JSON.stringify({ sessionId, conversationId: conversation.id, text }),
+    })
+  },
   createGroup: (sessionId: string, name: string) => apiRequest<{ group: BackendGroup }>('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
   sendFriendRequest: (sessionId: string, toUserId: EntityId, sign = '') => apiRequest<{ request: BackendFriendRequest }>('/friends/requests', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, sign }) }),
   receivedFriendRequests: (sessionId: string) => apiRequest<{ requests?: BackendFriendRequest[] }>(`/friends/requests/received?sessionId=${encodeURIComponent(sessionId)}`),

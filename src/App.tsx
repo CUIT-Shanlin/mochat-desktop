@@ -9,7 +9,7 @@ import './App.css'
 import { CallSignaling, api, getApiBaseUrl, getCallBaseUrl, getCallWsUrl, getMediaBaseUrl } from './api'
 import { Avatar, EmptyState, Logo, Modal } from './components'
 import { conversations as seedConversations, friendRequests, initialMessages } from './data'
-import type { BackendFriend, BackendFriendRequest, BackendGroup, CallSession, ChatMessage, Conversation, EntityId, FriendRequest, Session } from './types'
+import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendTextMessage, CallSession, ChatMessage, Conversation, EntityId, FriendRequest, Session } from './types'
 
 type Section = 'chats' | 'contacts' | 'groups' | 'requests' | 'settings'
 
@@ -52,6 +52,21 @@ function groupToConversation(group: BackendGroup): Conversation {
     preview: '暂无消息',
     time: '',
     unread: 0,
+  }
+}
+
+function messageTime(serverTimeMs: number) {
+  return new Date(serverTimeMs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function textMessageToChatMessage(message: BackendTextMessage, session: Session): ChatMessage {
+  return {
+    id: message.msgId,
+    conversationId: message.conversationId,
+    fromMe: String(message.senderUserId) === String(session.userId),
+    text: message.text,
+    time: messageTime(message.serverTimeMs),
+    status: 'sent',
   }
 }
 
@@ -146,7 +161,7 @@ function ConversationList({ items, selected, onSelect }: { items: Conversation[]
   </aside>
 }
 
-function Chat({ conversation, messages, onSend, onCall }: { conversation: Conversation; messages: ChatMessage[]; onSend: (text: string, attachments: File[]) => Promise<void>; onCall: (kind: 'voice' | 'video') => void }) {
+function Chat({ conversation, messages, serviceMode, onSend, onCall }: { conversation: Conversation; messages: ChatMessage[]; serviceMode: boolean; onSend: (text: string, attachments: File[]) => Promise<void>; onCall: (kind: 'voice' | 'video') => void }) {
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<File[]>([])
   const [sending, setSending] = useState(false)
@@ -171,7 +186,7 @@ function Chat({ conversation, messages, onSend, onCall }: { conversation: Conver
     }
   }
   return <section className="chat-panel">
-    <header className="chat-header"><div className="chat-person"><Avatar initials={conversation.initials} color={conversation.color} size="sm" online={conversation.online} /><span><strong>{conversation.name}</strong><small>{conversation.online ? '在线' : conversation.kind === 'group' ? '5 位成员' : '离线'}</small></span></div><div className="chat-actions"><button onClick={() => onCall('voice')} title="语音通话"><Phone /></button><button onClick={() => onCall('video')} title="视频通话"><Video /></button><button title="会话详情"><MoreVertical /></button></div></header>
+    <header className="chat-header"><div className="chat-person"><Avatar initials={conversation.initials} color={conversation.color} size="sm" online={conversation.online} /><span><strong>{conversation.name}</strong><small>{conversation.kind === 'group' ? '群组会话' : serviceMode ? '已连接' : conversation.online ? '在线' : '离线'}</small></span></div><div className="chat-actions"><button onClick={() => onCall('voice')} title="语音通话"><Phone /></button><button onClick={() => onCall('video')} title="视频通话"><Video /></button><button title="会话详情"><MoreVertical /></button></div></header>
     <div className="message-area">
       <div className="date-divider"><span>今天</span></div>
       {current.length === 0 ? <EmptyState icon={<MessageSquare />} title="开始聊天" text={`向 ${conversation.name} 发送第一条消息`} /> : current.map((message) => <div key={message.id} className={`message-row ${message.fromMe ? 'mine' : ''}`}>
@@ -380,6 +395,23 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [call, setCall] = useState<'voice' | 'video' | null>(null)
   const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
+  const refreshConversationPreview = useCallback((conversationId: EntityId, latest?: ChatMessage) => {
+    if (!latest) return
+    setConversations((current) => current.map((conversation) => String(conversation.id) === String(conversationId)
+      ? { ...conversation, preview: latest.text, time: latest.time }
+      : conversation
+    ))
+  }, [])
+  const loadMessages = useCallback(async () => {
+    if (session.demo || !selectedConversation) return
+    const response = await api.textMessages(session.sessionId, selectedConversation.id)
+    const remoteMessages = (response.items ?? []).map((message) => textMessageToChatMessage(message, session))
+    setMessages((current) => {
+      const otherMessages = current.filter((message) => String(message.conversationId) !== String(selectedConversation.id))
+      return [...otherMessages, ...remoteMessages]
+    })
+    refreshConversationPreview(selectedConversation.id, remoteMessages.at(-1))
+  }, [refreshConversationPreview, selectedConversation, session])
   const loadDirectory = useCallback(async (cancelled?: () => boolean) => {
     setDirectoryLoading(true)
     setDirectoryError('')
@@ -422,23 +454,52 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     socket.onerror = () => console.warn('MoChat call signaling disconnected')
     return () => signaling.disconnect()
   }, [session.demo, session.sessionId, signaling])
+  useEffect(() => {
+    if (session.demo || !selectedConversation) return
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        if (!cancelled) await loadMessages()
+      } catch (reason) {
+        console.warn('MoChat message polling failed', reason)
+      }
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [loadMessages, selectedConversation, session.demo])
   async function send(text: string, attachments: File[]) {
     if (!selectedConversation || selected === null) return
     const now = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
     const optimisticId = Date.now()
-    setMessages((current) => [...current, { id: optimisticId, conversationId: selected, fromMe: true, text, time: now, status: 'sending' }])
-    if (!session.demo) {
+    if (session.demo) {
+      const localMessage = { id: optimisticId, conversationId: selected, fromMe: true, text, time: now, status: 'sent' } satisfies ChatMessage
+      setMessages((current) => [...current, localMessage])
+      refreshConversationPreview(selected, localMessage)
+      return
+    }
+    if (attachments.length > 0) {
       for (const file of attachments) {
         const media = await api.uploadMedia(file)
         await api.sendMultimediaMessage(session.sessionId, selectedConversation, media)
       }
     }
-    setMessages((current) => current.map((message) => message.id === optimisticId ? { ...message, status: 'sent' } : message))
+    const response = await api.sendTextMessage(session.sessionId, selectedConversation, text)
+    const sentMessage = textMessageToChatMessage(response.message, session)
+    setMessages((current) => [
+      ...current.filter((message) => String(message.id) !== String(sentMessage.id)),
+      sentMessage,
+    ])
+    refreshConversationPreview(selectedConversation.id, sentMessage)
+    await loadMessages()
   }
   return <main className="app-shell">
     <WindowControls />
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
-    {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
+    {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
     <div className={`connection-pill ${session.demo ? 'demo' : ''}`}>{session.demo ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : '服务已连接'}<ChevronDown /></div>
     {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
   </main>

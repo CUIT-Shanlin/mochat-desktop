@@ -1,14 +1,16 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
 const { spawn } = require('node:child_process')
+const fs = require('node:fs')
+const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
-const { pathToFileURL } = require('node:url')
 
 const isDev = !app.isPackaged
 const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
 const devRendererUrl = 'http://localhost:5173'
 const packagedRendererPath = path.join(__dirname, '..', 'build', 'renderer', 'index.html')
-const packagedRendererUrl = pathToFileURL(packagedRendererPath).toString()
+let packagedRendererUrl = ''
+let rendererServer = null
 
 function encodeLaunchConfig(config) {
   return Buffer.from(JSON.stringify(config), 'utf8').toString('base64url')
@@ -168,7 +170,7 @@ function createWindow() {
 
 function isRendererNavigation(url) {
   if (isDev) return url === devRendererUrl || url.startsWith(`${devRendererUrl}/`)
-  return url === packagedRendererUrl
+  return Boolean(packagedRendererUrl) && (url === packagedRendererUrl || url.startsWith(packagedRendererUrl))
 }
 
 function loadRenderer(window) {
@@ -176,7 +178,59 @@ function loadRenderer(window) {
     if (window.webContents.getURL() !== devRendererUrl) window.loadURL(devRendererUrl)
     return
   }
-  if (window.webContents.getURL() !== packagedRendererUrl) window.loadFile(packagedRendererPath)
+  if (window.webContents.getURL() !== packagedRendererUrl) window.loadURL(packagedRendererUrl)
+}
+
+function startPackagedRendererServer() {
+  if (isDev || rendererServer) return Promise.resolve()
+  const root = path.dirname(packagedRendererPath)
+  const mimeTypes = new Map([
+    ['.html', 'text/html; charset=utf-8'],
+    ['.js', 'text/javascript; charset=utf-8'],
+    ['.css', 'text/css; charset=utf-8'],
+    ['.json', 'application/json; charset=utf-8'],
+    ['.png', 'image/png'],
+    ['.jpg', 'image/jpeg'],
+    ['.jpeg', 'image/jpeg'],
+    ['.svg', 'image/svg+xml; charset=utf-8'],
+    ['.webp', 'image/webp'],
+    ['.ico', 'image/x-icon'],
+    ['.woff', 'font/woff'],
+    ['.woff2', 'font/woff2'],
+  ])
+
+  rendererServer = http.createServer((request, response) => {
+    const requestUrl = new URL(request.url || '/', 'http://127.0.0.1')
+    const decodedPath = decodeURIComponent(requestUrl.pathname)
+    const relativePath = decodedPath === '/' ? 'index.html' : decodedPath.replace(/^\/+/, '')
+    const requestedFile = path.normalize(path.join(root, relativePath))
+    const insideRendererRoot = requestedFile === root || requestedFile.startsWith(`${root}${path.sep}`)
+    const filePath = insideRendererRoot ? requestedFile : packagedRendererPath
+
+    fs.stat(filePath, (statError, stats) => {
+      const finalPath = statError || !stats.isFile() ? packagedRendererPath : filePath
+      response.setHeader('Content-Type', mimeTypes.get(path.extname(finalPath)) || 'application/octet-stream')
+      fs.createReadStream(finalPath)
+        .on('error', () => {
+          response.writeHead(500)
+          response.end('Renderer asset unavailable')
+        })
+        .pipe(response)
+    })
+  })
+
+  return new Promise((resolve, reject) => {
+    rendererServer.once('error', reject)
+    rendererServer.listen(0, '127.0.0.1', () => {
+      const address = rendererServer.address()
+      if (!address || typeof address === 'string') {
+        reject(new Error('Failed to bind packaged renderer server'))
+        return
+      }
+      packagedRendererUrl = `http://127.0.0.1:${address.port}/`
+      resolve()
+    })
+  })
 }
 
 app.on('open-file', (event) => {
@@ -202,7 +256,8 @@ ipcMain.on('window:maximize', (event) => {
 })
 ipcMain.on('window:close', (event) => BrowserWindow.fromWebContents(event.sender)?.close())
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await startPackagedRendererServer()
   setupMenus()
   createWindow()
   if (isTestWindow) app.setName('MoChat 测试窗口')
@@ -213,4 +268,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  rendererServer?.close()
 })

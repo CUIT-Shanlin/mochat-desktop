@@ -123,7 +123,7 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
       <div className="secure-note"><Info />首次登录将自动生成身份公钥，用于端到端加密</div>
     </section>
     {confirm && <Modal title="创建或登录账号" onClose={() => setConfirm(false)} footer={<><button className="ghost-button" onClick={() => setConfirm(false)}>取消</button><button className="primary-button" disabled={busy} onClick={submit}>{busy ? '正在连接…' : '确认并进入'}</button></>}>
-      <p>系统会为 <strong>{username.trim()}</strong> 生成本地身份公钥。若后端当前不可用，将进入演示模式，你仍可体验全部客户端交互。</p>
+      <p>系统会为 <strong>{username.trim()}</strong> 生成或复用本地身份公钥。若后端当前不可用，将进入演示模式；若登录状态失效，需要重新登录。</p>
     </Modal>}
   </main>
 }
@@ -513,6 +513,14 @@ export default function App() {
     }
     catch { return null }
   })
+  useEffect(() => {
+    function handleSessionInvalid() {
+      localStorage.removeItem('mochat.session')
+      setSession(null)
+    }
+    window.addEventListener('mochat:session-invalid', handleSessionInvalid)
+    return () => window.removeEventListener('mochat:session-invalid', handleSessionInvalid)
+  }, [])
   function logout() { localStorage.removeItem('mochat.session'); setSession(null) }
   return session ? <MainApp session={session} onLogout={logout} /> : <Login onLogin={setSession} />
 }

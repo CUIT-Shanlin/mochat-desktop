@@ -36,6 +36,11 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit): Pr
   const text = await response.text().catch(() => '')
   const body = parseJsonPreservingLargeIntegers(text)
   const errorMessage = typeof body.error === 'string' ? body.error : typeof body.message === 'string' ? body.message : `请求失败 (${response.status})`
+  if (response.status === 401 || errorMessage.toLowerCase().includes('session invalid') || errorMessage.toLowerCase().includes('invalid session')) {
+    const error = new SessionInvalidError(errorMessage)
+    window.dispatchEvent(new CustomEvent('mochat:session-invalid', { detail: error.message }))
+    throw error
+  }
   if (!response.ok || body.success === false) throw new Error(errorMessage)
   return (body.data ?? body) as T
 }
@@ -163,5 +168,12 @@ export class CallSignaling {
   disconnect() {
     this.socket?.close()
     this.socket = null
+  }
+}
+
+export class SessionInvalidError extends Error {
+  constructor(message = '登录状态已失效，请重新登录') {
+    super(message)
+    this.name = 'SessionInvalidError'
   }
 }

@@ -2,6 +2,7 @@ import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendTextMess
 
 const demoEnabled = import.meta.env.VITE_DEMO_MODE !== 'false'
 const testIdentityKeys: Record<string, string> = {
+  dkh: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=',
   mochat_alice: 'egVLD9Zpd4lMjPqqrJAlz6SewBAtGsQetX5FMOryBYA=',
   mochat_bob: 'rz+yFQsoNPBC9L8bmGQSyyrsVYYsztR3zYeMVlkDBkU=',
   mochat_carol: '1EFmIYZ7LMN10Je/6qouv6sMY/SoiXVdK8QmcwFpHEw=',

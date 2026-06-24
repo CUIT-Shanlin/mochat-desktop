@@ -559,6 +559,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [call, setCall] = useState<'voice' | 'video' | null>(null)
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null)
   const [connectedIncomingCall, setConnectedIncomingCall] = useState<CallSession | null>(null)
+  const [callSignalStatus, setCallSignalStatus] = useState<'connecting' | 'ready' | 'disconnected'>(session.demo ? 'disconnected' : 'connecting')
   const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
   const refreshConversationPreview = useCallback((conversationId: EntityId, latest?: ChatMessage) => {
@@ -614,23 +615,58 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   }, [loadDirectory, session.demo])
   useEffect(() => {
     if (session.demo) return
-    const socket = signaling.connect(session.sessionId, (payload) => {
-      if (payload.type === 'call_invite' && payload.fromUserId && payload.roomName) {
-        setIncomingCall({ type: 'call_invite', callId: payload.callId, fromUserId: payload.fromUserId, roomName: payload.roomName })
-        return
+    let disposed = false
+    let retryCount = 0
+    let retryTimer = 0
+    let socket: WebSocket | null = null
+
+    const connect = () => {
+      if (disposed) return
+      setCallSignalStatus('connecting')
+      socket = signaling.connect(session.sessionId, (payload) => {
+        if (payload.type === 'call_signal_ready') {
+          retryCount = 0
+          setCallSignalStatus('ready')
+          return
+        }
+        if (payload.type === 'call_invite' && payload.fromUserId && payload.roomName) {
+          setIncomingCall({ type: 'call_invite', callId: payload.callId, fromUserId: payload.fromUserId, roomName: payload.roomName })
+          return
+        }
+        if (payload.type === 'call_group_started' && payload.fromUserId && payload.groupId && payload.roomName) {
+          setIncomingCall({ type: 'call_group_started', callId: payload.callId, fromUserId: payload.fromUserId, groupId: payload.groupId, roomName: payload.roomName })
+          return
+        }
+        if (payload.type === 'call_accepted_with_token' && payload.roomName && payload.token && payload.livekitUrl) {
+          setConnectedIncomingCall({ roomName: payload.roomName, token: payload.token, livekitUrl: payload.livekitUrl })
+          return
+        }
+        if (payload.type?.startsWith('call_')) console.info('MoChat call signal', payload)
+      })
+      socket.onerror = () => {
+        setCallSignalStatus('disconnected')
+        console.warn('MoChat call signaling disconnected')
       }
-      if (payload.type === 'call_group_started' && payload.fromUserId && payload.groupId && payload.roomName) {
-        setIncomingCall({ type: 'call_group_started', callId: payload.callId, fromUserId: payload.fromUserId, groupId: payload.groupId, roomName: payload.roomName })
-        return
+      socket.onclose = (event) => {
+        if (disposed) return
+        setCallSignalStatus('disconnected')
+        if (event.code === 1008) {
+          window.dispatchEvent(new CustomEvent('mochat:session-invalid', { detail: '通话信令登录状态已失效，请重新登录' }))
+          return
+        }
+        const delay = Math.min(1000 * 2 ** retryCount, 8000)
+        retryCount += 1
+        retryTimer = window.setTimeout(connect, delay)
       }
-      if (payload.type === 'call_accepted_with_token' && payload.roomName && payload.token && payload.livekitUrl) {
-        setConnectedIncomingCall({ roomName: payload.roomName, token: payload.token, livekitUrl: payload.livekitUrl })
-        return
-      }
-      if (payload.type?.startsWith('call_')) console.info('MoChat call signal', payload)
-    })
-    socket.onerror = () => console.warn('MoChat call signaling disconnected')
-    return () => signaling.disconnect()
+    }
+
+    connect()
+    return () => {
+      disposed = true
+      window.clearTimeout(retryTimer)
+      socket?.close()
+      signaling.disconnect()
+    }
   }, [session.demo, session.sessionId, signaling])
   useEffect(() => {
     if (session.demo || !selectedConversation) return
@@ -678,7 +714,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     <WindowControls />
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
     {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
-    <div className={`connection-pill ${session.demo ? 'demo' : ''}`}>{session.demo ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : '服务已连接'}<ChevronDown /></div>
+    <div className={`connection-pill ${session.demo || callSignalStatus !== 'ready' ? 'demo' : ''}`}>{session.demo || callSignalStatus !== 'ready' ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : callSignalStatus === 'ready' ? '服务已连接' : callSignalStatus === 'connecting' ? '通话信令连接中' : '通话信令已断开'}<ChevronDown /></div>
     {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
     {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} signaling={signaling} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
   </main>

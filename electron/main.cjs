@@ -9,6 +9,7 @@ const isDev = !app.isPackaged
 const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
 const devRendererUrl = 'http://localhost:5173'
 const packagedRendererPath = path.join(__dirname, '..', 'build', 'renderer', 'index.html')
+const packagedRendererPort = 39271
 let packagedRendererUrl = ''
 let rendererServer = null
 
@@ -220,8 +221,20 @@ function startPackagedRendererServer() {
   })
 
   return new Promise((resolve, reject) => {
-    rendererServer.once('error', reject)
-    rendererServer.listen(0, '127.0.0.1', () => {
+    let attempts = 0
+    const listen = () => {
+      rendererServer.once('error', (error) => {
+        if (error.code === 'EADDRINUSE' && attempts < 10) {
+          attempts += 1
+          listen()
+          return
+        }
+        reject(error)
+      })
+      rendererServer.listen(packagedRendererPort + attempts, '127.0.0.1')
+    }
+
+    rendererServer.once('listening', () => {
       const address = rendererServer.address()
       if (!address || typeof address === 'string') {
         reject(new Error('Failed to bind packaged renderer server'))
@@ -230,6 +243,7 @@ function startPackagedRendererServer() {
       packagedRendererUrl = `http://127.0.0.1:${address.port}/`
       resolve()
     })
+    listen()
   })
 }
 

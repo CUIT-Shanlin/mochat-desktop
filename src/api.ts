@@ -1,6 +1,6 @@
 import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendGroupJoinRequest, BackendTextMessage, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
 
-const demoEnabled = import.meta.env.VITE_DEMO_MODE !== 'false'
+const demoEnabled = import.meta.env.VITE_DEMO_MODE === 'true'
 const testIdentityKeys: Record<string, string> = {
   dkh: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=',
   mochat_alice: 'egVLD9Zpd4lMjPqqrJAlz6SewBAtGsQetX5FMOryBYA=',

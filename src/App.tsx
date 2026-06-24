@@ -9,9 +9,50 @@ import './App.css'
 import { CallSignaling, api, getCallWsUrl } from './api'
 import { Avatar, EmptyState, Logo, Modal } from './components'
 import { conversations as seedConversations, friendRequests, initialMessages } from './data'
-import type { CallSession, ChatMessage, Conversation, Session } from './types'
+import type { BackendFriend, BackendGroup, CallSession, ChatMessage, Conversation, Session } from './types'
 
 type Section = 'chats' | 'contacts' | 'groups' | 'requests' | 'settings'
+
+const avatarPalette = ['#607be8', '#7b69d9', '#3a9d89', '#d48758', '#cf6f9f', '#4f9cd8']
+
+function initialsFor(name: string) {
+  return (name.trim().slice(0, 1) || '?').toUpperCase()
+}
+
+function colorFor(id: number) {
+  return avatarPalette[Math.abs(id) % avatarPalette.length]
+}
+
+function friendToConversation(friend: BackendFriend): Conversation {
+  const name = friend.username || `用户 ${friend.userId}`
+  return {
+    id: friend.conversationId,
+    targetId: friend.userId,
+    kind: 'private',
+    name,
+    initials: initialsFor(name),
+    color: colorFor(friend.userId),
+    preview: '暂无消息',
+    time: '',
+    unread: 0,
+    online: false,
+  }
+}
+
+function groupToConversation(group: BackendGroup): Conversation {
+  const name = group.name || `群组 ${group.groupId}`
+  return {
+    id: group.groupId,
+    targetId: group.groupId,
+    kind: 'group',
+    name,
+    initials: initialsFor(name),
+    color: colorFor(group.groupId),
+    preview: '暂无消息',
+    time: '',
+    unread: 0,
+  }
+}
 
 function WindowControls() {
   if (!window.mochatDesktop || window.mochatDesktop.platform === 'darwin') return null
@@ -63,10 +104,10 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
 
 function Sidebar({ section, setSection, session, onLogout }: { section: Section; setSection: (section: Section) => void; session: Session; onLogout: () => void }) {
   const nav: { id: Section; label: string; icon: typeof MessageSquare; badge?: number }[] = [
-    { id: 'chats', label: '消息', icon: MessageSquare, badge: 2 },
+    { id: 'chats', label: '消息', icon: MessageSquare, badge: session.demo ? 2 : undefined },
     { id: 'contacts', label: '联系人', icon: ContactRound },
     { id: 'groups', label: '群组', icon: Users },
-    { id: 'requests', label: '新的朋友', icon: UserPlus, badge: 2 },
+    { id: 'requests', label: '新的朋友', icon: UserPlus, badge: session.demo ? 2 : undefined },
   ]
   return <aside className="rail">
     <div className="drag-region" />
@@ -79,14 +120,14 @@ function Sidebar({ section, setSection, session, onLogout }: { section: Section;
   </aside>
 }
 
-function ConversationList({ items, selected, onSelect }: { items: Conversation[]; selected: number; onSelect: (id: number) => void }) {
+function ConversationList({ items, selected, onSelect }: { items: Conversation[]; selected: number | null; onSelect: (id: number) => void }) {
   const [query, setQuery] = useState('')
   const filtered = items.filter((item) => `${item.name}${item.preview}`.toLowerCase().includes(query.toLowerCase()))
   return <aside className="conversation-panel">
     <div className="drag-region panel-drag" />
     <div className="search-row"><div className="search-box"><Search /><input aria-label="搜索会话" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索联系人、群聊、消息" /></div><button className="add-button" title="新建会话"><Plus /></button></div>
     <div className="panel-heading"><span>最近消息</span><button><Menu /></button></div>
-    <div className="conversation-list">{filtered.map((item) => <button key={item.id} className={`conversation-item ${selected === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)}>
+    <div className="conversation-list">{filtered.length === 0 ? <div className="conversation-empty">后端当前没有返回会话数据</div> : filtered.map((item) => <button key={item.id} className={`conversation-item ${selected === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)}>
       <Avatar initials={item.initials} color={item.color} online={item.online} />
       <span className="conversation-copy"><strong>{item.name}</strong><small>{item.preview}</small></span>
       <span className="conversation-meta"><time>{item.time}</time>{item.unread > 0 && <b>{item.unread}</b>}</span>
@@ -138,8 +179,8 @@ function Chat({ conversation, messages, onSend, onCall }: { conversation: Conver
   </section>
 }
 
-function Directory({ section, session }: { section: Exclude<Section, 'chats'>; session: Session }) {
-  const [requests, setRequests] = useState(friendRequests)
+function Directory({ section, session, conversations }: { section: Exclude<Section, 'chats'>; session: Session; conversations: Conversation[] }) {
+  const [requests, setRequests] = useState(session.demo ? friendRequests : [])
   const [server, setServer] = useState(localStorage.getItem('mochat.server') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080')
   const [callServer, setCallServer] = useState(localStorage.getItem('mochat.callServer') || import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090')
   const [callWs, setCallWs] = useState(localStorage.getItem('mochat.callWs') || import.meta.env.VITE_CALL_WS_URL || getCallWsUrl())
@@ -148,8 +189,8 @@ function Directory({ section, session }: { section: Exclude<Section, 'chats'>; s
   if (section === 'settings') return <section className="page-panel"><header><h1>设置</h1><p>管理客户端偏好与服务连接</p></header><div className="settings-card"><h3>账号</h3><div className="account-row"><Avatar initials={session.username[0]} color="#607be8" size="lg" /><div><strong>{session.username}</strong><span>用户 ID：{session.userId}</span><em>{session.demo ? '演示模式' : '已连接服务'}</em></div></div></div><div className="settings-card"><h3>连接</h3><label>API 服务地址<input value={server} onChange={(event) => setServer(event.target.value)} /></label><label>Call 服务地址<input value={callServer} onChange={(event) => setCallServer(event.target.value)} /></label><label>Call WebSocket 地址<input value={callWs} onChange={(event) => setCallWs(event.target.value)} /></label><label>Media 服务地址<input value={mediaServer} onChange={(event) => setMediaServer(event.target.value)} /></label><button className="primary-button" onClick={() => { localStorage.setItem('mochat.server', server); localStorage.setItem('mochat.callServer', callServer); localStorage.setItem('mochat.callWs', callWs); localStorage.setItem('mochat.mediaServer', mediaServer) }}>保存配置</button></div><div className="settings-card toggle-row"><div><h3>桌面通知</h3><p>收到新消息时显示系统通知</p></div><button className={`toggle ${notifications ? 'on' : ''}`} onClick={() => setNotifications(!notifications)}><i /></button></div></section>
   if (section === 'requests') return <section className="page-panel"><header><h1>新的朋友</h1><p>{requests.filter((item) => item.status === 'pending').length} 个待处理申请</p></header><div className="directory-list">{requests.map((request) => <div className="request-row" key={request.id}><Avatar initials={request.name[0]} color={request.id === 1 ? '#7b69d9' : '#3a9d89'} /><div><strong>{request.name}</strong><span>{request.message}</span><small>用户 ID：{request.userId}</small></div>{request.status === 'pending' ? <div className="request-actions"><button onClick={() => setRequests(requests.map((item) => item.id === request.id ? { ...item, status: 'rejected' } : item))}>忽略</button><button className="primary-button" onClick={() => setRequests(requests.map((item) => item.id === request.id ? { ...item, status: 'accepted' } : item))}>接受</button></div> : <em>{request.status === 'accepted' ? '已添加' : '已忽略'}</em>}</div>)}</div></section>
   const isGroup = section === 'groups'
-  const source = seedConversations.filter((item) => isGroup ? item.kind === 'group' : item.kind === 'private')
-  return <section className="page-panel"><header><div><h1>{isGroup ? '群组' : '联系人'}</h1><p>{source.length} {isGroup ? '个群聊' : '位联系人'}</p></div><button className="primary-button"><Plus />{isGroup ? '创建群组' : '添加好友'}</button></header><div className="directory-list">{source.map((item) => <div className="directory-row" key={item.id}><Avatar initials={item.initials} color={item.color} online={item.online} /><div><strong>{item.name}</strong><span>{isGroup ? `${item.targetId} · 5 位成员` : `用户 ID：${item.targetId}`}</span></div><button className="ghost-button"><MessageSquare />发消息</button><button className="icon-button"><MoreVertical /></button></div>)}</div></section>
+  const source = conversations.filter((item) => isGroup ? item.kind === 'group' : item.kind === 'private')
+  return <section className="page-panel"><header><div><h1>{isGroup ? '群组' : '联系人'}</h1><p>{source.length} {isGroup ? '个群聊' : '位联系人'}</p></div><button className="primary-button"><Plus />{isGroup ? '创建群组' : '添加好友'}</button></header><div className="directory-list">{source.length === 0 ? <EmptyState icon={isGroup ? <Users /> : <ContactRound />} title={isGroup ? '暂无群组' : '暂无联系人'} text={session.demo ? '演示数据为空' : '后端当前没有返回数据'} /> : source.map((item) => <div className="directory-row" key={item.id}><Avatar initials={item.initials} color={item.color} online={item.online} /><div><strong>{item.name}</strong><span>{isGroup ? `${item.targetId} · 群组` : `用户 ID：${item.targetId}`}</span></div><button className="ghost-button"><MessageSquare />发消息</button><button className="icon-button"><MoreVertical /></button></div>)}</div></section>
 }
 
 function CallModal({ session, conversation, kind, onClose }: { session: Session; conversation: Conversation; kind: 'voice' | 'video'; onClose: () => void }) {
@@ -208,11 +249,48 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
 
 function MainApp({ session, onLogout }: { session: Session; onLogout: () => void }) {
   const [section, setSection] = useState<Section>('chats')
-  const [selected, setSelected] = useState(seedConversations[0].id)
-  const [messages, setMessages] = useState(initialMessages)
+  const [conversations, setConversations] = useState<Conversation[]>(session.demo ? seedConversations : [])
+  const [selected, setSelected] = useState<number | null>(session.demo ? seedConversations[0]?.id ?? null : null)
+  const [messages, setMessages] = useState<ChatMessage[]>(session.demo ? initialMessages : [])
+  const [directoryLoading, setDirectoryLoading] = useState(false)
+  const [directoryError, setDirectoryError] = useState('')
   const [call, setCall] = useState<'voice' | 'video' | null>(null)
-  const selectedConversation = useMemo(() => seedConversations.find((item) => item.id === selected) ?? seedConversations[0], [selected])
+  const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
+  useEffect(() => {
+    if (session.demo) return
+    let cancelled = false
+    async function loadDirectory() {
+      setDirectoryLoading(true)
+      setDirectoryError('')
+      try {
+        const [friendsResponse, groupsResponse] = await Promise.all([
+          api.friends(session.sessionId),
+          api.groups(session.sessionId),
+        ])
+        if (cancelled) return
+        const remoteConversations = [
+          ...(friendsResponse.friends ?? []).map(friendToConversation),
+          ...(groupsResponse.groups ?? []).map(groupToConversation),
+        ]
+        setConversations(remoteConversations)
+        setSelected(remoteConversations[0]?.id ?? null)
+        setMessages([])
+      } catch (reason) {
+        if (cancelled) return
+        setConversations([])
+        setSelected(null)
+        setMessages([])
+        setDirectoryError(reason instanceof Error ? reason.message : '加载通讯录失败')
+      } finally {
+        if (!cancelled) setDirectoryLoading(false)
+      }
+    }
+    loadDirectory()
+    return () => {
+      cancelled = true
+    }
+  }, [session.demo, session.sessionId])
   useEffect(() => {
     if (session.demo) return
     const socket = signaling.connect(session.sessionId, (payload) => {
@@ -222,6 +300,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     return () => signaling.disconnect()
   }, [session.demo, session.sessionId, signaling])
   async function send(text: string, attachments: File[]) {
+    if (!selectedConversation || selected === null) return
     const now = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
     const optimisticId = Date.now()
     setMessages((current) => [...current, { id: optimisticId, conversationId: selected, fromMe: true, text, time: now, status: 'sending' }])
@@ -236,9 +315,9 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   return <main className="app-shell">
     <WindowControls />
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
-    {section === 'chats' ? <><ConversationList items={seedConversations} selected={selected} onSelect={setSelected} /><Chat conversation={selectedConversation} messages={messages} onSend={send} onCall={setCall} /></> : <Directory section={section} session={session} />}
+    {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} />}
     <div className={`connection-pill ${session.demo ? 'demo' : ''}`}>{session.demo ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : '服务已连接'}<ChevronDown /></div>
-    {call && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
+    {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
   </main>
 }
 

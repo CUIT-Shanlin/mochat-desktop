@@ -20,6 +20,18 @@ export interface Conversation {
   online?: boolean
 }
 
+export interface BackendFriend {
+  conversationId: number
+  userId: number
+  username: string
+}
+
+export interface BackendGroup {
+  groupId: number
+  name: string
+  ownerUserId: number
+}
+
 export interface ChatMessage {
   id: number
   conversationId: number

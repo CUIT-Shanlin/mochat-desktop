@@ -1,4 +1,4 @@
-import type { CallSession, CallSignalPayload, Conversation, MediaMessageType, MediaUpload, Session } from './types'
+import type { BackendFriend, BackendGroup, CallSession, CallSignalPayload, Conversation, MediaMessageType, MediaUpload, Session } from './types'
 
 const demoEnabled = import.meta.env.VITE_DEMO_MODE !== 'false'
 
@@ -60,8 +60,8 @@ export const api = {
       return { userId: 10001, username, sessionId: `demo-${crypto.randomUUID()}`, demo: true }
     }
   },
-  friends: (sessionId: string) => apiRequest<{ friends: unknown[] }>(`/friends?sessionId=${encodeURIComponent(sessionId)}`),
-  groups: (sessionId: string) => apiRequest<{ groups: unknown[] }>(`/groups?sessionId=${encodeURIComponent(sessionId)}`),
+  friends: (sessionId: string) => apiRequest<{ friends?: BackendFriend[] }>(`/friends?sessionId=${encodeURIComponent(sessionId)}`),
+  groups: (sessionId: string) => apiRequest<{ groups?: BackendGroup[] }>(`/groups?sessionId=${encodeURIComponent(sessionId)}`),
   history: (sessionId: string, conversationId: number) => apiRequest<{ items: unknown[] }>(`/history?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&limit=50`),
   createGroup: (sessionId: string, name: string) => apiRequest('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
   sendFriendRequest: (sessionId: string, toUserId: number, sign = '') => apiRequest('/friends/requests', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, sign }) }),

@@ -964,12 +964,15 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     let retryCount = 0
     let retryTimer = 0
     let socket: WebSocket | null = null
+    let readyReceived = false
 
     const connect = () => {
       if (disposed) return
+      readyReceived = false
       setCallSignalStatus('connecting')
       socket = signaling.connect(session.sessionId, (payload) => {
         if (payload.type === 'call_signal_ready') {
+          readyReceived = true
           retryCount = 0
           setCallSignalStatus('ready')
           return
@@ -989,18 +992,18 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
         if (payload.type?.startsWith('call_')) console.info('MoChat call signal', payload)
       })
       socket.onerror = () => {
-        setCallSignalStatus('disconnected')
         console.warn('MoChat call signaling disconnected')
       }
       socket.onclose = (event) => {
         if (disposed) return
-        setCallSignalStatus('disconnected')
+        if (!readyReceived) setCallSignalStatus('disconnected')
         if (event.code === 1008) {
           window.dispatchEvent(new CustomEvent('mochat:session-invalid', { detail: '通话信令登录状态已失效，请重新登录' }))
           return
         }
         const delay = Math.min(1000 * 2 ** retryCount, 8000)
         retryCount += 1
+        setCallSignalStatus('connecting')
         retryTimer = window.setTimeout(connect, delay)
       }
     }

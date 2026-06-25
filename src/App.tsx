@@ -423,6 +423,21 @@ function Directory({
     }
   }, [section, session.demo, session.sessionId])
 
+  // 每次切到「联系人」/「群组」tab 时重新拉一次通讯录，
+  // 这样在一个机器开多个客户端的场景下，另一端的好友/群组变更能即时反映出来。
+  // onRefreshDirectory 用 ref 持有，避免父组件传入新箭头函数引用导致 effect 反复触发。
+  const refreshDirectoryRef = useRef(onRefreshDirectory)
+  useEffect(() => {
+    refreshDirectoryRef.current = onRefreshDirectory
+  })
+  useEffect(() => {
+    if (session.demo) return
+    if (section !== 'contacts' && section !== 'groups') return
+    refreshDirectoryRef.current().catch((reason) => {
+      console.warn('MoChat directory refresh on tab switch failed', reason)
+    })
+  }, [section, session.demo])
+
   async function submitFriendRequest() {
     const toUserId = friendUserId.trim()
     if (!/^\d+$/.test(toUserId)) {
@@ -640,7 +655,35 @@ async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUr
   })
   livekitRoom.on(RoomEvent.TrackUnsubscribed, (track) => detachTrack(track))
   livekitRoom.on(RoomEvent.Disconnected, removeAllMedia)
-  await livekitRoom.connect(result.livekitUrl, result.token)
+  // LiveKit client 的 Room.connect() 在 WebSocket 握手失败时不一定 throw，
+  // 为了避免一直卡在「正在连接 LiveKit 房间…」状态，这里同时挂一个
+  // 断开事件 + 15 秒连接超时，保证 connectLiveKitRoom 一定会 resolve/reject。
+  let rejectConnect: ((reason: Error) => void) | null = null
+  const disconnectedPromise = new Promise<never>((_, reject) => {
+    rejectConnect = reject
+  })
+  const onDisconnectedForConnect = () => {
+    rejectConnect?.(new Error('LiveKit 房间已断开'))
+  }
+  livekitRoom.on(RoomEvent.Disconnected, onDisconnectedForConnect)
+  const timeoutMs = 15000
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(
+      () => reject(new Error(`LiveKit 连接超时（${Math.round(timeoutMs / 1000)} 秒），请检查服务地址或网络`)),
+      timeoutMs,
+    )
+  })
+  try {
+    await Promise.race([
+      livekitRoom.connect(result.livekitUrl, result.token),
+      disconnectedPromise,
+      timeoutPromise,
+    ])
+  } finally {
+    livekitRoom.off(RoomEvent.Disconnected, onDisconnectedForConnect)
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+  }
   await livekitRoom.startAudio().catch((reason: unknown) => console.warn('MoChat audio playback start failed', reason))
   for (const participant of livekitRoom.remoteParticipants.values()) {
     for (const publication of participant.audioTrackPublications.values()) {
@@ -673,7 +716,7 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
     async function startCall() {
       try {
         const result = conversation.kind === 'group'
-          ? await api.startGroupCall(session.sessionId, conversation.targetId)
+          ? await api.startGroupCall(session.sessionId, conversation.targetId, kind)
           : await api.startPrivateCall(session.sessionId, conversation.targetId, kind)
         if (cancelled) return
         setCallSession(result)
@@ -716,12 +759,14 @@ function IncomingCallModal({
   session,
   incoming,
   connectedSession,
+  signaling,
   onConnectedConsumed,
   onClose,
 }: {
   session: Session
   incoming: IncomingCall
   connectedSession: CallSession | null
+  signaling: CallSignaling
   onConnectedConsumed: () => void
   onClose: () => void
 }) {
@@ -731,6 +776,13 @@ function IncomingCallModal({
   const callKind = incoming.callKind || 'voice'
   const localVideoRef = useRef<HTMLDivElement | null>(null)
   const remoteVideoRef = useRef<HTMLDivElement | null>(null)
+  // onConnectedConsumed 用 ref 持有最新回调引用，避免父组件匿名箭头函数导致 effect 反复触发
+  // 死循环（每次父组件重渲染都重新走一遍 connectLiveKitRoom，LiveKit 连接被反复打断，
+  // await 永远走不到 setStatus('视频通话已连接')，本地摄像头也没机会开启）。
+  const onConnectedConsumedRef = useRef(onConnectedConsumed)
+  useEffect(() => {
+    onConnectedConsumedRef.current = onConnectedConsumed
+  })
 
   useEffect(() => {
     if (!connectedSession || connectedSession.roomName !== incoming.roomName || room) return
@@ -746,7 +798,7 @@ function IncomingCallModal({
         }
         setRoom(livekitRoom)
         setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
-        onConnectedConsumed()
+        onConnectedConsumedRef.current()
       } catch (reason) {
         setStatus(reason instanceof Error ? reason.message : '通话服务连接失败')
       }
@@ -755,7 +807,7 @@ function IncomingCallModal({
     return () => {
       cancelled = true
     }
-  }, [callKind, connectedSession, incoming.roomName, onConnectedConsumed, room])
+  }, [callKind, connectedSession, incoming.roomName, room])
 
   async function accept() {
     setAccepting(true)
@@ -769,12 +821,15 @@ function IncomingCallModal({
         setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
         return
       }
-      const result = await api.signalPrivateCall(session.sessionId, incoming.fromUserId, 'call_accept', incoming.roomName)
-      const sessionToConnect = { ...result, roomName: result.roomName || incoming.roomName }
-      setStatus('正在连接 LiveKit 房间…')
-      const livekitRoom = await connectLiveKitRoom(sessionToConnect, callKind, { local: localVideoRef.current, remote: remoteVideoRef.current })
-      setRoom(livekitRoom)
-      setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
+      // 私聊信令走 WebSocket：后端会在 onMessage 处理 call_accept 时回 call_accepted_with_token，
+      // 之后通过 connectedSession 走 connectAcceptedPrivateCall 流程自动连入 LiveKit 房间。
+      signaling.send({
+        fromUserId: session.userId,
+        toUserId: incoming.fromUserId,
+        type: 'call_accept',
+        roomName: incoming.roomName,
+      })
+      setStatus('已发送接听信令，等待对方房间信息…')
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '接听失败')
       setAccepting(false)
@@ -835,7 +890,10 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
         conversationId: selectedConversation.id,
       }
       const delivery = toHistoryDelivery(historyItem, selectedConversation.kind)
-      const privateFromMe = selectedConversation.kind === 'private' && String(delivery.toUid) === String(selectedConversation.targetId)
+      // 用后端返回的 senderUid 判断 fromMe，不再依赖 payload_base64 解码出来的 toUid。
+      // 原因：早期入库的 payload 是明文 UTF-8 字符串，protobuf 解码后 toUid 会变成 0；
+      // 而新数据在 senderUid 字段里始终是真实的发送者 userId，更可靠。
+      const privateFromMe = selectedConversation.kind === 'private' && String(item.senderUid) === String(session.userId)
       const message = deliveryToChatMessage(delivery, session, privateFromMe)
       return selectedConversation.kind === 'private'
         ? { ...message, text: extractTextFromDecodedPayload({ contents: delivery.contents as unknown[] }) }
@@ -958,6 +1016,18 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
       window.mochatDesktop?.chat.disconnect().catch(() => undefined)
     }
   }, [session, upsertConversationMessage])
+  // 当前聊天对象变化、或 chat 网关连上后，主动发一条带 sessionId 的 RECEIVE_ACK。
+  // access-gateway 的 SessionBindingHandler 只在收到 PRIVATE_MESSAGE / GROUP_MESSAGE / CLIENT_RECEIVE_ACK
+  // 这类带 sessionId 的消息时才会去权威服务认人，并把 online:user:{uid} 写进 Redis。
+  // 如果不发，access-gateway 永远找不到这条连接来推实时消息。
+  useEffect(() => {
+    if (session.demo || chatStatus !== 'connected' || !selectedConversation) return
+    window.mochatDesktop?.chat.sendReceiveAck({
+      sessionId: session.sessionId,
+      conversationId: selectedConversation.id,
+      latestReceivedSeq: latestSeqRef.current.get(String(selectedConversation.id)) ?? 0,
+    }).catch(() => undefined)
+  }, [chatStatus, selectedConversation, session])
   useEffect(() => {
     if (session.demo) return
     let disposed = false
@@ -1075,7 +1145,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     <div className={`connection-pill ${session.demo || chatStatus !== 'connected' ? 'demo' : ''}`}>{session.demo || chatStatus !== 'connected' ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : chatStatus === 'connected' ? (callSignalStatus === 'ready' ? '聊天与通话已连接' : '聊天已连接') : chatStatus === 'reconnecting' ? '聊天服务重连中' : chatStatus === 'connecting' ? '聊天服务连接中' : '聊天服务已断开'}<ChevronDown /></div>
     {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
     {detailsConversation && <ConversationDetailsModal session={session} conversation={detailsConversation} contacts={conversations.filter((item) => item.kind === 'private')} onRefreshDirectory={() => loadDirectory()} onClose={() => setDetailsConversation(null)} />}
-    {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
+    {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} signaling={signaling} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
   </main>
 }
 

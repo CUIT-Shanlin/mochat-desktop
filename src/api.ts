@@ -186,9 +186,8 @@ export const api = {
   handleFriendRequest: (sessionId: string, requestId: EntityId, action: 'accept' | 'reject') => apiRequest<{ request: BackendFriendRequest }>(`/friends/requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),
   startPrivateCall: (sessionId: string, toUserId: EntityId, callKind: 'voice' | 'video' = 'voice') =>
     callRequest<CallSession>('/calls/private/invite', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, callKind }) }),
-  signalPrivateCall: (sessionId: string, toUserId: EntityId, type: 'call_accept' | 'call_reject' | 'call_hangup', roomName: string) =>
-    callRequest<CallSession>('/calls/private/signal', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, type, roomName }) }),
-  startGroupCall: (sessionId: string, groupId: EntityId) => callRequest<CallSession>('/calls/group/start', { method: 'POST', body: JSON.stringify({ sessionId, groupId }) }),
+  startGroupCall: (sessionId: string, groupId: EntityId, callKind: 'voice' | 'video' = 'voice') =>
+    callRequest<CallSession>('/calls/group/start', { method: 'POST', body: JSON.stringify({ sessionId, groupId, callKind }) }),
   joinGroupCall: (sessionId: string, roomName: string) => callRequest<CallSession>('/calls/group/join', { method: 'POST', body: JSON.stringify({ sessionId, roomName }) }),
   leaveGroupCall: (sessionId: string, roomName: string) => callRequest<{ left: boolean }>('/calls/group/leave', { method: 'POST', body: JSON.stringify({ sessionId, roomName }) }),
   async uploadMedia(file: File): Promise<MediaUpload> {

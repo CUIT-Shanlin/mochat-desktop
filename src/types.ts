@@ -12,6 +12,7 @@ export interface Session {
 export interface BackendHistoryItem {
   seq: EntityId
   msgId: EntityId
+  senderUid: EntityId
   conversationId: EntityId
   serverTimeMs: number
   payloadBase64: string

@@ -138,9 +138,36 @@ function decodeMessage(type: protobuf.Type, bytes: Uint8Array) {
 
 export function decodeHistoryItem(item: BackendHistoryItem, kind: 'private' | 'group') {
   const bytes = base64ToBytes(item.payloadBase64)
-  return kind === 'private'
-    ? decodeMessage(PrivateMessageReq, bytes)
-    : decodeMessage(GroupMessageReq, bytes)
+  let decoded: Record<string, unknown> | null = null
+  try {
+    decoded = kind === 'private'
+      ? decodeMessage(PrivateMessageReq, bytes)
+      : decodeMessage(GroupMessageReq, bytes)
+  } catch (error) {
+    decoded = null
+    if (import.meta.env.DEV) {
+      console.warn('MoChat history payload protobuf decode failed, fallback to plain text', { kind, error })
+    }
+  }
+
+  // 历史数据兜底：早期入库的 payload_base64 是明文 UTF-8 字符串的 base64，
+  // 没有走 protobuf 编码（早期手工 / 多媒体通道写入的数据）。protobufjs 对完全
+  // 非 protobuf 字节有两种表现：抛异常，或者"部分解码"返回空 contents。两种情况
+  // 都通过 contents 是否为空 + 内容类型是否齐全来判断是否走明文兜底。
+  const contents = Array.isArray(decoded?.contents) ? (decoded!.contents as unknown[]) : []
+  if (contents.length > 0) return decoded!
+  const text = decodePlainText(bytes)
+  if (!text) return decoded ?? {}
+  return { contents: [{ plainText: { text } }] }
+}
+
+function decodePlainText(bytes: Uint8Array): string {
+  if (bytes.length === 0) return ''
+  try {
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+  } catch {
+    return ''
+  }
 }
 
 export function decodeRealtimeDelivery(payload: unknown) {

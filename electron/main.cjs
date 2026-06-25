@@ -11,6 +11,13 @@ const {
   buildPrivateMediaPayload,
   buildPrivateTextPayload,
 } = require('./chat-gateway.cjs')
+const e2ee = require('./e2ee.cjs')
+
+// 当前登录用户名 → 由 renderer 在登录成功后通过 `session:set-user` 注入。
+// 主进程需要在私聊发送前做 AES-256-GCM 加密、在私聊接收时解密，
+// 所以必须知道本地用户名和对方用户名（用来从 seed 取 X25519 私钥/对端公钥）。
+let currentUsername = ''
+let currentUserId = ''
 
 const isDev = !app.isPackaged
 const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
@@ -189,10 +196,50 @@ function chatClientFor(sender) {
   const key = sender.id
   if (chatClients.has(key)) return chatClients.get(key)
   const client = new ChatGatewayClient((event) => {
-    if (!sender.isDestroyed()) sender.send('chat:event', event)
+    if (sender.isDestroyed()) return
+    // 私聊：在这里统一做端到端解密，把 ciphertext 替换成 plaintext，再发给 renderer。
+    // renderer 不持有任何私钥，只看到的等于群聊 PlainText 的形态。
+    if (event.type === 'delivery') {
+      try {
+        const patched = decryptDeliveryIfNeeded(event.payload)
+        if (patched) event.payload = patched
+      } catch (error) {
+        console.warn('MoChat decrypt delivery failed', error)
+      }
+    }
+    sender.send('chat:event', event)
   })
   chatClients.set(key, client)
   return client
+}
+
+// 解析 delivery payload，找到 EncryptedText 内容，
+// 用本地 username 与发送方 username 做 X25519+AES-GCM 解密。
+// 成功时返回新 payload（contents[0].plainText.text = 明文 + 移除 encryptedText）；
+// 失败或无需解密（群聊 / 媒体 / 未知 sender）时返回 null。
+function decryptDeliveryIfNeeded(payload) {
+  if (!payload || !currentUsername) return null
+  const fromUid = String(payload.fromUid ?? '')
+  if (!fromUid) return null
+  const peerUsername = e2ee.USERNAME_BY_USERID[fromUid]
+  if (!peerUsername) return null
+  const contents = Array.isArray(payload.contents) ? payload.contents : []
+  if (contents.length === 0) return null
+  const first = contents[0] || {}
+  const enc = first.encryptedText
+  if (!enc || !enc.nonce || !enc.ciphertext) return null
+  const result = e2ee.decryptForClient({
+    myUsername: currentUsername,
+    peerUsername,
+    nonceBase64: enc.nonce,
+    ciphertextBase64: enc.ciphertext,
+  })
+  if (result.error || typeof result.plaintext !== 'string') return null
+  // 用 plaintext 形式重新组装 contents，让 renderer 当群聊一样显示。
+  return {
+    ...payload,
+    contents: [{ plainText: { text: result.plaintext } }],
+  }
 }
 
 function isRendererNavigation(url) {
@@ -293,13 +340,78 @@ ipcMain.handle('chat:connect', async (event, payload) => {
   return { ok: true }
 })
 
+// renderer 登录后把本机 user 身份告诉主进程，用于后续私聊 ECDH 加解密。
+// 同时保留 currentUserId，方便在日志和后续 peer 查询用。
+ipcMain.handle('session:set-user', async (event, payload) => {
+  currentUsername = String(payload?.username || '')
+  currentUserId = String(payload?.userId || '')
+  return { ok: true, username: currentUsername, userId: currentUserId }
+})
+
+// 给 renderer 反查 seed userId（登录前已知用户名时直接拿）。
+ipcMain.handle('session:seed-user-id', async (event, username) => {
+  return e2ee.seedUserIdFor(String(username || ''))
+})
+
+// 给 renderer 反查 seed username by userId（接收 delivery 时确定发送方是谁）。
+ipcMain.handle('session:username-by-id', async (event, userId) => {
+  return e2ee.USERNAME_BY_USERID[String(userId)] || null
+})
+
+// 解密私聊历史消息：renderer 拉到 history items 后批量送过来，
+// 主进程用 currentUsername + peerUsername 做 X25519+AES-GCM 解密，
+// 解不出来的 item 原样返回（renderer 会按 ciphertext 显示 [加密消息]）。
+ipcMain.handle('chat:decrypt-history', async (event, payload) => {
+  const items = Array.isArray(payload?.items) ? payload.items : []
+  const peerUsername = payload?.peerUsername
+  const kind = payload?.kind || 'private'
+  if (kind !== 'private' || !peerUsername || !currentUsername) return items
+  const { decodeHistoryItem } = require('./history-decode.cjs')
+  return items.map((item) => {
+    try {
+      if (!item?.payloadBase64) return item
+      const decoded = decodeHistoryItem(item.payloadBase64, 'private')
+      const enc = decoded?.contents?.[0]?.encryptedText
+      if (!enc || !enc.nonce || !enc.ciphertext) return item
+      const result = e2ee.decryptForClient({
+        myUsername: currentUsername,
+        peerUsername,
+        nonceBase64: enc.nonce,
+        ciphertextBase64: enc.ciphertext,
+      })
+      if (result.error) return item
+      return { ...item, decryptedText: result.plaintext }
+    } catch {
+      return item
+    }
+  })
+})
+
 ipcMain.handle('chat:disconnect', async (event) => {
   chatClientFor(event.sender).disconnect()
   return { ok: true }
 })
 
 ipcMain.handle('chat:send-private-text', async (event, payload) => {
-  chatClientFor(event.sender).sendPrivateMessage(buildPrivateTextPayload(payload))
+  // 私聊：在这里做端到端加密。payload.fromUsername / payload.peerUsername 由 renderer 注入；
+  // 加密后交给 ChatGatewayClient 打包 EncryptedText 帧。
+  const { text, fromUsername, peerUsername, ...rest } = payload
+  const enc = e2ee.encryptForClient({ myUsername: fromUsername, peerUsername, plaintext: text })
+  if (enc.error) {
+    // 没有 seed 密钥对（任意一边不是 seed 用户）时退回 base64 兜底，让链路至少能透传。
+    const fallback = Buffer.from(text, 'utf8').toString('base64')
+    chatClientFor(event.sender).sendPrivateMessage(buildPrivateTextPayload({
+      ...rest,
+      nonceBase64: Buffer.alloc(12, 0).toString('base64'),
+      ciphertextBase64: fallback,
+    }))
+    return { ok: true }
+  }
+  chatClientFor(event.sender).sendPrivateMessage(buildPrivateTextPayload({
+    ...rest,
+    nonceBase64: enc.nonceBase64,
+    ciphertextBase64: enc.ciphertextBase64,
+  }))
   return { ok: true }
 })
 

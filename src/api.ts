@@ -1,23 +1,41 @@
-import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendGroupJoinRequest, BackendHistoryItem, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
+import type {
+  BackendFriend,
+  BackendFriendRequest,
+  BackendGroup,
+  BackendGroupJoinRequest,
+  BackendHistoryItem,
+  CallSession,
+  CallSignalPayload,
+  Conversation,
+  EntityId,
+  MediaMessageType,
+  MediaUpload,
+  Session,
+} from './types'
 
 const demoEnabled = import.meta.env.VITE_DEMO_MODE === 'true'
-const testIdentityKeys: Record<string, string> = {
-  dkh: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=',
-  mochat_alice: 'egVLD9Zpd4lMjPqqrJAlz6SewBAtGsQetX5FMOryBYA=',
-  mochat_bob: 'rz+yFQsoNPBC9L8bmGQSyyrsVYYsztR3zYeMVlkDBkU=',
-  mochat_carol: '1EFmIYZ7LMN10Je/6qouv6sMY/SoiXVdK8QmcwFpHEw=',
+
+// 服务器已经 seed 的用户列表：登录这些用户名时必须用 seed 里的 publicKey，
+// 否则服务端 PostgreSQL 里已有的 X25519 公钥校验会拒绝（400 publicKey mismatch）。
+// 其他用户名随机生成 32 字节身份密钥，让 loginOrRegister 路径自动开户。
+const SEED_IDENTITY: Record<string, string> = {
+  alice: 'kKLWF9BhKhM9Hpa8hHJ5GSwT1siclljWTfSXICzXglg=',
+  bob: 'zRqkJgR0wYAE1KcZbFlNgdRmyrX6qjcE+mbdxESTyCI=',
+  carol: 'AebyWTXbesZyM/84CZicekytA4r80ElO0gugdiLFxB8=',
+  dave: 'LI3DiEPX+h4dDMKPnOjGA9oUNpqFN04oXdSKZkGe7VQ=',
+  eve: 'MysFrPmPK5CfEeTj5f3xr8e+42ThZ5uWxftdoNq/3W4=',
 }
 
-function configuredValue(key: 'server' | 'callServer' | 'callWs' | 'mediaServer', storageKey: string, fallback?: string) {
+function configuredValue(key: 'server' | 'callServer' | 'callWs' | 'mediaServer' | 'chatGateway', storageKey: string, fallback?: string) {
   return localStorage.getItem(storageKey) || window.mochatDesktop?.launchConfig?.[key] || fallback || ''
 }
 
 export function getApiBaseUrl() {
-  return configuredValue('server', 'mochat.server', import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080').replace(/\/$/, '')
+  return configuredValue('server', 'mochat.server', import.meta.env.VITE_API_BASE_URL || 'http://103.40.14.14:57675').replace(/\/$/, '')
 }
 
 export function getCallBaseUrl() {
-  return configuredValue('callServer', 'mochat.callServer', import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090').replace(/\/$/, '')
+  return configuredValue('callServer', 'mochat.callServer', import.meta.env.VITE_CALL_BASE_URL || 'http://103.40.14.14:24478').replace(/\/$/, '')
 }
 
 export function getCallWsUrl() {
@@ -26,15 +44,17 @@ export function getCallWsUrl() {
 }
 
 export function getMediaBaseUrl() {
-  return configuredValue('mediaServer', 'mochat.mediaServer', import.meta.env.VITE_MEDIA_BASE_URL || 'http://localhost:8083').replace(/\/$/, '')
+  // multimedia-service 跟 api-service 同地址；（让 fallback 不再指向 localhost:8083）
+  return configuredValue('mediaServer', 'mochat.mediaServer', import.meta.env.VITE_MEDIA_BASE_URL || getApiBaseUrl()).replace(/\/$/, '')
 }
 
 export function getChatGatewayUrl() {
-  const configured = localStorage.getItem('mochat.chatGateway') || import.meta.env.VITE_CHAT_GATEWAY_URL
+  const configured = localStorage.getItem('mochat.chatGateway') || window.mochatDesktop?.launchConfig?.chatGateway || import.meta.env.VITE_CHAT_GATEWAY_URL
   if (configured) return normalizeChatGatewayUrl(configured)
+  // 未配置时，从 api-service 地址推导：同主机、固定 TCP 端口 20823
   const api = new URL(getApiBaseUrl())
   const host = normalizeChatGatewayHost(api.hostname)
-  return `tls://${host}:9000`
+  return `tls://${host}:20823`
 }
 
 function normalizeChatGatewayUrl(raw: string) {
@@ -91,11 +111,12 @@ function generatePublicKey(): string {
 }
 
 function identityKeyFor(username: string) {
-  const storageKey = `mochat.identityKey.${username}`
-  if (testIdentityKeys[username]) {
-    localStorage.setItem(storageKey, testIdentityKeys[username])
-    return testIdentityKeys[username]
+  // 服务器 seed 用户必须使用固定 publicKey，否则后端会拒绝
+  if (SEED_IDENTITY[username]) {
+    localStorage.setItem(`mochat.identityKey.${username}`, SEED_IDENTITY[username])
+    return SEED_IDENTITY[username]
   }
+  const storageKey = `mochat.identityKey.${username}`
   const existing = localStorage.getItem(storageKey)
   if (existing) return existing
   const publicKey = generatePublicKey()
@@ -119,25 +140,27 @@ export const api = {
   },
   friends: (sessionId: string) => apiRequest<{ friends?: BackendFriend[] }>(`/friends?sessionId=${encodeURIComponent(sessionId)}`),
   groups: (sessionId: string) => apiRequest<{ groups?: BackendGroup[] }>(`/groups?sessionId=${encodeURIComponent(sessionId)}`),
-  history: (sessionId: string, conversationId: EntityId) =>
-    apiRequest<{ items?: Omit<BackendHistoryItem, 'conversationId'>[] }>(`/history?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&limit=50`),
+  history: (sessionId: string, conversationId: EntityId, opts: { cursorSeq?: EntityId; limit?: number } = {}) => {
+    const params = new URLSearchParams({ sessionId, conversationId: String(conversationId), limit: String(opts.limit ?? 50) })
+    if (opts.cursorSeq != null) params.set('cursorSeq', String(opts.cursorSeq))
+    return apiRequest<{ items?: Omit<BackendHistoryItem, 'conversationId'>[] }>(`/history?${params.toString()}`)
+  },
   conversationState: (sessionId: string, conversationId: EntityId) =>
     apiRequest<{ conversationId: EntityId; latestSeq: EntityId; latestMessageTime: number }>(`/conversations/${conversationId}/state?sessionId=${encodeURIComponent(sessionId)}`),
   privatePeerReceivedSeq: (sessionId: string, conversationId: EntityId) =>
     apiRequest<{ conversationId: EntityId; latestReceivedSeq: EntityId }>(`/conversations/${conversationId}/private-peer-received-seq?sessionId=${encodeURIComponent(sessionId)}`),
   createGroup: (sessionId: string, name: string) => apiRequest<{ group: BackendGroup }>('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
-  inviteGroupMember: (sessionId: string, groupId: EntityId, memberUserId: EntityId) =>
-    apiRequest<{ groupId: EntityId; userId: EntityId; status: string }>(`/groups/${groupId}/members`, { method: 'POST', body: JSON.stringify({ sessionId, memberUserId }) }),
+  // 后端没有 “拉人直接入群” 的 HTTP 接口，唯一的入群方式是 “申请加入 → 群主审批”。
+  // 这个方法保留只是为了兼容旧的 UI 调用点，调用会得到 404，UI 层会引导改成 “邀请对方发送加群申请”。
   sendGroupJoinRequest: (sessionId: string, groupId: EntityId, sign = '') => apiRequest<{ request: BackendGroupJoinRequest }>(`/groups/${groupId}/join-requests`, { method: 'POST', body: JSON.stringify({ sessionId, sign }) }),
   groupJoinRequests: (sessionId: string, groupId: EntityId) => apiRequest<{ requests?: BackendGroupJoinRequest[] }>(`/groups/${groupId}/join-requests?sessionId=${encodeURIComponent(sessionId)}`),
   handleGroupJoinRequest: (sessionId: string, groupId: EntityId, requestId: EntityId, action: 'accept' | 'reject') => apiRequest<{ request: BackendGroupJoinRequest }>(`/groups/${groupId}/join-requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),
   sendFriendRequest: (sessionId: string, toUserId: EntityId, sign = '') => apiRequest<{ request: BackendFriendRequest }>('/friends/requests', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, sign }) }),
   receivedFriendRequests: (sessionId: string) => apiRequest<{ requests?: BackendFriendRequest[] }>(`/friends/requests/received?sessionId=${encodeURIComponent(sessionId)}`),
   handleFriendRequest: (sessionId: string, requestId: EntityId, action: 'accept' | 'reject') => apiRequest<{ request: BackendFriendRequest }>(`/friends/requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),
-  startPrivateCall: (sessionId: string, toUserId: EntityId, callKind: 'voice' | 'video' = 'voice') =>
-    callRequest<CallSession>('/calls/private/invite', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, callKind }) }),
-  signalPrivateCall: (sessionId: string, toUserId: EntityId, type: 'call_accept' | 'call_reject' | 'call_hangup', roomName: string) =>
-    callRequest<CallSession>('/calls/private/signal', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, type, roomName }) }),
+  // 通话 HTTP 接口；callKind 字段后端忽略，统一走 voice 路径，token 入房后 LiveKit 自己升级 video。
+  startPrivateCall: (sessionId: string, toUserId: EntityId) =>
+    callRequest<CallSession>('/calls/private/invite', { method: 'POST', body: JSON.stringify({ sessionId, toUserId }) }),
   startGroupCall: (sessionId: string, groupId: EntityId) => callRequest<CallSession>('/calls/group/start', { method: 'POST', body: JSON.stringify({ sessionId, groupId }) }),
   joinGroupCall: (sessionId: string, roomName: string) => callRequest<CallSession>('/calls/group/join', { method: 'POST', body: JSON.stringify({ sessionId, roomName }) }),
   leaveGroupCall: (sessionId: string, roomName: string) => callRequest<{ left: boolean }>('/calls/group/leave', { method: 'POST', body: JSON.stringify({ sessionId, roomName }) }),
@@ -180,13 +203,23 @@ function inferMediaType(mimeType: string): MediaMessageType {
   return 'file'
 }
 
+// CallSignaling：与 call-service 的 WebSocket 信令通道。
+// 私聊信令（call_accept / call_reject / call_cancel / call_hangup）通过 WebSocket 发送，
+// 后端在 WebSocket onMessage 路径里转给 CallService.forwardPrivateSignal，
+// 并在被叫发 call_accept 时回 call_accepted_with_token（包含被叫入房 token）。
 export class CallSignaling {
-  private socket: WebSocket | null = null
+  // 暴露 socket 字段，方便上层组件在已经复用 connect 监听 onSignal 之外，
+  // 再用 addEventListener('message') 监听特定 type（如主叫监听被叫的 accept/reject/hangup）。
+  socket: WebSocket | null = null
 
   connect(sessionId: string, onSignal: (payload: CallSignalPayload) => void) {
     this.socket = new WebSocket(`${getCallWsUrl()}/calls/ws/${encodeURIComponent(sessionId)}`)
     this.socket.onmessage = (event) => {
-      try { onSignal(parseJsonPreservingLargeIntegers(String(event.data)) as unknown as CallSignalPayload) } catch { onSignal({ type: 'raw', message: String(event.data) }) }
+      try {
+        onSignal(parseJsonPreservingLargeIntegers(String(event.data)) as unknown as CallSignalPayload)
+      } catch {
+        onSignal({ type: 'raw', message: String(event.data) })
+      }
     }
     return this.socket
   }

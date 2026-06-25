@@ -66,7 +66,26 @@ button { border: 0; background: transparent; cursor: pointer; }
 .message-area { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 30px; }
 .date-divider { height: 26px; display: flex; align-items: center; justify-content: center; }.date-divider span { padding: 3px 10px; border-radius: 8px; color: #67768c; background: #111c2e; font-size: 9px; }
 .message-row { display: flex; gap: 9px; align-items: flex-end; max-width: 68%; margin: 14px 0; }.message-row.mine { margin-left: auto; flex-direction: row-reverse; }.message-bubble { padding: 10px 13px; color: #e1e8f5; background: #1c2940; border: 1px solid #27364f; border-radius: 4px 12px 12px 12px; font-size: 12px; line-height: 1.55; box-shadow: 0 5px 18px #00000012; }.mine .message-bubble { color: white; background: linear-gradient(135deg,#5486ed,#4f73da); border-color: #7198ef55; border-radius: 12px 4px 12px 12px; }
-.message-time { color: #637187; font-size: 8px; padding: 4px 3px 0; display: flex; align-items: center; justify-content: flex-start; gap: 0; }.mine .message-time { justify-content: flex-end; }.message-time svg { width: 9px; height: 9px; color: #78a6ff; margin-left: -3px; }
+.message-time { color: #637187; font-size: 8px; padding: 4px 3px 0; display: flex; align-items: center; justify-content: flex-start; gap: 0; }.mine .message-time { justify-content: flex-end; }.message-time svg { width: 9px; height: 9px; color: #78a6ff; margin-left: -3px; }.message-time .status-sending { color: #7d8aa0; font-size: 9px; margin-left: 4px; }
+
+/* 媒体气泡：图片/视频/音频/文件卡片 */
+.message-bubble.has-media { padding: 0; overflow: hidden; background: #1c2940; border-color: #2a3c5b; }
+.mine .message-bubble.has-media { background: linear-gradient(135deg,#5486ed,#4f73da); border-color: #7198ef55; }
+.message-media { display: flex; flex-direction: column; gap: 6px; max-width: 280px; }
+.message-image { display: block; max-width: 280px; max-height: 200px; border-radius: 8px; object-fit: cover; cursor: pointer; }
+.message-video { display: block; max-width: 280px; max-height: 200px; border-radius: 8px; background: #000; }
+.message-media.audio { flex-direction: row; align-items: center; gap: 10px; padding: 8px 10px; }
+.message-media.audio audio { width: 220px; height: 28px; }
+.message-media-caption { font-size: 12px; line-height: 1.45; padding: 6px 4px 2px; }
+.message-file-card { display: inline-flex; align-items: center; gap: 10px; padding: 10px 12px; min-width: 200px; max-width: 280px; border-radius: 8px; background: #182541; border: 1px solid #2a3c5b; color: #dbe4f4; text-decoration: none; }
+.mine .message-file-card { background: rgba(255,255,255,0.18); border-color: rgba(255,255,255,0.22); color: #fff; }
+.message-file-card:hover { background: #21304e; }
+.message-file-card svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.message-file-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.message-file-info strong { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.message-file-info small { font-size: 10px; color: #8b9bb8; }
+.mine .message-file-info small { color: rgba(255,255,255,0.7); }
+.message-file-name { font-size: 10px; color: #9aa8c0; }
 .composer { flex: 0 0 auto; min-height: 132px; border-top: 1px solid var(--line); background: #101a2b; padding: 7px 17px 14px; position: relative; }.composer-tools { display: flex; gap: 2px; height: 35px; }.composer-tools button { width: 30px; height: 30px; }.composer textarea { width: 100%; height: 56px; resize: none; color: #e1e9f7; background: transparent; border: 0; outline: none; padding: 6px 92px 5px 5px; font-size: 12px; line-height: 1.5; }.composer textarea::placeholder { color: #5f6e84; }
 .file-picker { display: none; }
 .composer-error { position: absolute; left: 17px; right: 110px; bottom: 11px; color: #ff8f99; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

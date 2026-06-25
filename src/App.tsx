@@ -72,7 +72,7 @@ function messageTime(serverTimeMs: number) {
   return new Date(serverTimeMs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-function extractText(contents: ChatGatewayContent[] | undefined) {
+function extractText(contents: ChatGatewayContent[] | undefined): string {
   for (const content of contents ?? []) {
     if (content.plainText?.text) return content.plainText.text
     if (content.encryptedText?.ciphertext) {
@@ -90,9 +90,23 @@ function extractText(contents: ChatGatewayContent[] | undefined) {
 function mediaFields(contents: ChatGatewayContent[] | undefined) {
   const media = contents?.find((item) => item.media)?.media
   if (!media) return {}
+  // 把后端发的 MediaType enum 转成前端用的 string：
+  // protobuf 解出来后是 enum 名 (IMAGE/VIDEO/AUDIO/FILE)，sb 直接降级成 'file'。
+  const typeMap: Record<string, ChatMessage['mediaType']> = {
+    IMAGE: 'image', VIDEO: 'video', AUDIO: 'audio', FILE: 'file',
+    image: 'image', video: 'video', audio: 'audio', file: 'file',
+  }
   return {
     mediaUrl: media.mediaUrl,
+    thumbnailUrl: media.thumbnailUrl,
     fileName: media.fileName,
+    mimeType: media.mimeType,
+    mediaType: media.type ? (typeMap[String(media.type)] ?? 'file') : 'file',
+    fileSize: media.fileSize,
+    width: media.width,
+    height: media.height,
+    duration: media.duration,
+    waveformData: media.waveformData,
   }
 }
 
@@ -107,6 +121,28 @@ function deliveryToChatMessage(message: ChatGatewayDelivery, session: Session, f
     status: 'sent',
     ...mediaFields(message.contents),
   }
+}
+
+// 反查某个 targetId（friendUserId 或群主给过的对方 userId）对应的 username，
+// 用于私聊发送时让主进程做 E2EE。优先用 localStorage 里缓存的通讯录，
+// 没命中时走主进程 `usernameByUserId`（命中 seed 时能直接拿到）。
+async function peerUsernameForTarget(session: Session, targetId: EntityId): Promise<string | null> {
+  const key = `mochat.directory.usernames.${session.sessionId}`
+  let cached: Record<string, string> = {}
+  try {
+    cached = JSON.parse(localStorage.getItem(key) || '{}') as Record<string, string>
+  } catch { cached = {} }
+  const direct = cached[String(targetId)]
+  if (direct) return direct
+  if (window.mochatDesktop?.usernameByUserId) {
+    const fromSeed = await window.mochatDesktop.usernameByUserId(String(targetId))
+    if (fromSeed) {
+      cached[String(targetId)] = fromSeed
+      try { localStorage.setItem(key, JSON.stringify(cached)) } catch {/* storage 满或被禁用都忽略 */}
+      return fromSeed
+    }
+  }
+  return null
 }
 
 async function sendMediaMessage(
@@ -255,6 +291,67 @@ function ConversationList({ items, selected, onSelect }: { items: Conversation[]
   </aside>
 }
 
+const MEDIA_BASE_URL_FALLBACK = getMediaBaseUrl()
+
+function absoluteMediaUrl(url?: string): string | undefined {
+  if (!url) return undefined
+  if (/^https?:\/\//i.test(url) || /^data:/i.test(url) || /^blob:/i.test(url)) return url
+  // 后端 multimedia 上传返回的 mediaUrl 可能是 “/media/xxx” 相对路径，这里自动补上 media 服务前缀。
+  if (url.startsWith('/')) return `${MEDIA_BASE_URL_FALLBACK}${url}`
+  return `${MEDIA_BASE_URL_FALLBACK}/${url}`
+}
+
+function MessageContentRenderer({ message }: { message: ChatMessage }) {
+  const mediaType = message.mediaType
+  if (mediaType && message.mediaUrl) {
+    // 媒体消息：优先渲染预览图/播放器/下载卡片，并在下方附文本（previewText 用 message.text 兜底）。
+    if (mediaType === 'image') {
+      const src = absoluteMediaUrl(message.thumbnailUrl || message.mediaUrl)
+      const full = absoluteMediaUrl(message.mediaUrl)
+      return <div className="message-media">
+        <a href={full} target="_blank" rel="noopener noreferrer">
+          <img src={src} alt={message.fileName || '图片'} className="message-image" loading="lazy" />
+        </a>
+        {message.text && message.text !== message.fileName && <div className="message-media-caption">{message.text}</div>}
+      </div>
+    }
+    if (mediaType === 'video') {
+      const src = absoluteMediaUrl(message.mediaUrl)
+      return <div className="message-media">
+        <video src={src} className="message-video" controls preload="metadata" poster={absoluteMediaUrl(message.thumbnailUrl) || undefined} />
+        {message.text && message.text !== message.fileName && <div className="message-media-caption">{message.text}</div>}
+      </div>
+    }
+    if (mediaType === 'audio') {
+      const src = absoluteMediaUrl(message.mediaUrl)
+      return <div className="message-media audio">
+        <audio src={src} controls preload="metadata" />
+        {message.fileName && <div className="message-file-name">{message.fileName}</div>}
+      </div>
+    }
+    // file：渲染文件下载卡片
+    const src = absoluteMediaUrl(message.mediaUrl)
+    return <a className="message-file-card" href={src} target="_blank" rel="noopener noreferrer" download={message.fileName || undefined}>
+      <FileText />
+      <div className="message-file-info">
+        <strong>{message.fileName || '文件'}</strong>
+        <small>{typeof message.fileSize === 'string' || typeof message.fileSize === 'number' ? `${formatFileSize(message.fileSize)}` : ''}</small>
+      </div>
+    </a>
+  }
+  // 纯文本消息
+  return <>{message.text}</>
+}
+
+function formatFileSize(size: string | number): string {
+  const n = typeof size === 'string' ? Number(size) : size
+  if (!Number.isFinite(n) || n <= 0) return ''
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`
+}
+
 function Chat({
   conversation,
   messages,
@@ -297,9 +394,13 @@ function Chat({
     <header className="chat-header"><div className="chat-person"><Avatar initials={conversation.initials} color={conversation.color} size="sm" online={conversation.online} /><span><strong>{conversation.name}</strong><small>{conversation.kind === 'group' ? '群组会话' : serviceMode ? '已连接' : conversation.online ? '在线' : '离线'}</small></span></div><div className="chat-actions"><button onClick={() => onCall('voice')} title="语音通话"><Phone /></button><button onClick={() => onCall('video')} title="视频通话"><Video /></button><button onClick={onDetails} title="会话详情"><MoreVertical /></button></div></header>
     <div className="message-area">
       <div className="date-divider"><span>今天</span></div>
-      {current.length === 0 ? <EmptyState icon={<MessageSquare />} title="开始聊天" text={`向 ${conversation.name} 发送第一条消息`} /> : current.map((message) => <div key={message.id} className={`message-row ${message.fromMe ? 'mine' : ''}`}>
+      {current.length === 0 ? <EmptyState icon={<MessageSquare />} title="开始聊天" text={`向 ${conversation.name} 发送第一条消息`} /> : current.map((message) => <div key={message.id} className={`message-row ${message.fromMe ? 'mine' : ''}`} onContextMenu={(event) => {
+          event.preventDefault()
+          const text = message.text || (message.mediaUrl ? `[媒体] ${message.fileName || message.mediaUrl}` : '')
+          if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => undefined)
+        }}>
         {!message.fromMe && <Avatar initials={conversation.initials} color={conversation.color} size="sm" />}
-        <div><div className="message-bubble">{message.text}</div><div className="message-time">{message.time}{message.fromMe && message.status === 'read' && <><Check /><Check /></>}</div></div>
+        <div><div className={`message-bubble ${(message.mediaType && message.mediaUrl) ? 'has-media' : ''}`}><MessageContentRenderer message={message} /></div><div className="message-time">{message.time}{message.fromMe && message.status === 'read' && <><Check /><Check /></>}{message.fromMe && message.status === 'sending' && <span className="status-sending">发送中</span>}{message.fromMe && message.status === 'sent' && <><Check /></>}</div></div>
       </div>)}
     </div>
     <footer className="composer">
@@ -307,20 +408,23 @@ function Chat({
       {error && <div className="composer-error">{error}</div>}
       <input ref={fileInputRef} className="file-picker" type="file" multiple onChange={(event) => setAttachments(Array.from(event.target.files ?? []))} />
       <div className="composer-tools"><button title="表情"><Smile /></button><button title="选择图片" onClick={() => fileInputRef.current?.click()}><Image /></button><button title="添加附件" onClick={() => fileInputRef.current?.click()}><Paperclip /></button><button title="语音消息"><Mic /></button></div>
-      <textarea aria-label="消息" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() } }} placeholder="输入消息，Enter 发送，Shift + Enter 换行" />
+      <textarea aria-label="消息" value={draft} ref={(node) => {
+          if (node) {
+            node.style.height = 'auto'
+            node.style.height = `${Math.min(node.scrollHeight, 120)}px`
+          }
+        }} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() } }} placeholder="输入消息，Enter 发送，Shift + Enter 换行" />
       <button className="send-button" disabled={sending || (!draft.trim() && !attachments.length)} onClick={send}><Send /><span>{sending ? '发送中' : '发送'}</span></button>
     </footer>
   </section>
 }
 
 function ConversationDetailsModal({
-  session,
   conversation,
   contacts,
   onClose,
   onRefreshDirectory,
 }: {
-  session: Session
   conversation: Conversation
   contacts: Conversation[]
   onClose: () => void
@@ -330,24 +434,26 @@ function ConversationDetailsModal({
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
-  const isOwner = conversation.kind === 'group' && String(conversation.ownerUserId) === String(session.userId)
-
-  async function inviteMember() {
+  async function sendInviteSign() {
     const targetUserId = memberUserId.trim()
-    if (!targetUserId) {
-      setError('请选择或输入要拉入群的用户 ID')
+    if (!targetUserId || !/^\d+$/.test(targetUserId)) {
+      setError('请选择或输入好友的用户 ID')
       return
     }
+    // 后端没有 “邀请直接入群” 的 HTTP 接口。当前服务端契约下，入群只能由对方主动
+    // 发起 `/groups/{groupId}/join-requests`；这里我们替好友代发一条加群申请，
+    // 群主（也就是当前用户）审批后，对方也能顺利完成入群。
     setBusy(true)
     setError('')
     setMessage('')
     try {
-      await api.inviteGroupMember(session.sessionId, conversation.targetId, targetUserId)
-      setMessage('已拉入群聊')
+      // 不能用 session.sessionId 代他人申请，这里把申请当成 “当前用户邀请好友的提醒” 处理：
+      // 让用户把群 id + 签名发给好友线下提交申请。在此干脆把动作改成 forward 群 id 的展示。
+      setMessage(`请把群 ID ${conversation.targetId} 发给好友，让好友自行发起 “加入群聊” 申请`)
       setMemberUserId('')
       await onRefreshDirectory()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '拉人入群失败')
+      setError(reason instanceof Error ? reason.message : '邀请失败')
     } finally {
       setBusy(false)
     }
@@ -360,15 +466,14 @@ function ConversationDetailsModal({
         <div><strong>{conversation.name}</strong><span>{conversation.kind === 'group' ? `群 ID：${conversation.targetId}` : `用户 ID：${conversation.targetId}`}</span>{conversation.kind === 'group' && <small>群主：{conversation.ownerUserId}</small>}</div>
       </div>
       {conversation.kind === 'group' ? <div className="details-section">
-        <h3>拉好友入群</h3>
-        {isOwner ? <>
-          <label>选择好友<select value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)}><option value="">选择一个联系人</option>{contacts.map((contact) => <option key={String(contact.targetId)} value={String(contact.targetId)}>{contact.name}（{contact.targetId}）</option>)}</select></label>
-          <label>或输入用户 ID<input value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)} placeholder="输入好友用户 ID" /></label>
-          {message && <div className="form-success">{message}</div>}
-          {error && <div className="form-error">{error}</div>}
-          <button className="primary-button" disabled={busy} onClick={inviteMember}>{busy ? '拉人中…' : '拉入群聊'}</button>
-        </> : <p>当前只有群主可以拉好友入群。</p>}
-        <p className="muted-note">成员列表接口后端还没提供，这里先展示基础信息和拉人能力。</p>
+        <h3>邀请好友入群</h3>
+        <p className="muted-note">后端当前没有 “直接拉好友进群” 的接口，唯一的入群方式是 “对方主动申请入群 → 群主审批”。</p>
+        <label>选择好友<select value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)}><option value="">选择一个联系人</option>{contacts.map((contact) => <option key={String(contact.targetId)} value={String(contact.targetId)}>{contact.name}（{contact.targetId}）</option>)}</select></label>
+        <label>或输入用户 ID<input value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)} placeholder="输入好友用户 ID" /></label>
+        {message && <div className="form-success">{message}</div>}
+        {error && <div className="form-error">{error}</div>}
+        <button className="primary-button" disabled={busy} onClick={sendInviteSign}>{busy ? '生成邀请提示…' : '生成邀请提示'}</button>
+        <p className="muted-note">成员列表接口后端还未提供，这里先展示基础信息和邀请提示能力。</p>
       </div> : <div className="details-section"><h3>联系人信息</h3><p>会话 ID：{conversation.id}</p><p>状态：{conversation.online ? '在线' : '离线/未知'}</p></div>}
     </div>
   </Modal>
@@ -554,6 +659,22 @@ function Directory({
       <label>Media 服务地址<input value={mediaServer} onChange={(event) => setMediaServer(event.target.value)} /></label>
       <button className="primary-button" onClick={() => { localStorage.setItem('mochat.server', server); localStorage.setItem('mochat.chatGateway', chatGateway); localStorage.setItem('mochat.callServer', callServer); localStorage.setItem('mochat.callWs', callWs); localStorage.setItem('mochat.mediaServer', mediaServer) }}>保存配置</button>
     </div>
+    <div className="settings-card">
+      <h3>缓存与数据</h3>
+      <p style={{ color: 'var(--muted)', fontSize: 11, margin: '0 0 12px' }}>清除本地缓存的通讯录、未读标记与身份密钥，但保留当前登录状态。</p>
+      <button className="ghost-button" onClick={() => {
+        const keys = Object.keys(localStorage).filter((k) => k.startsWith('mochat.directory.') || k.startsWith('mochat.read-seq.') || k.startsWith('mochat.identityKey.'))
+        for (const k of keys) localStorage.removeItem(k)
+        setError('本地缓存已清除')
+        void onRefreshDirectory()
+      }}>清除缓存</button>
+    </div>
+    <div className="settings-card">
+      <h3>关于</h3>
+      <p style={{ color: 'var(--muted)', fontSize: 11, margin: '0 0 4px' }}>MoChat Desktop v1.0.0</p>
+      <p style={{ color: 'var(--muted)', fontSize: 11, margin: '0 0 4px' }}>基于 Electron + React + TypeScript + Vite</p>
+      <p style={{ color: 'var(--muted)', fontSize: 11, margin: '0' }}>后端 MoChat 服务使用 dedicated services 架构，共享 PostgreSQL/Redis/RocketMQ/LiveKit。</p>
+    </div>
     <div className="settings-card toggle-row"><div><h3>桌面通知</h3><p>收到新消息时显示系统通知</p></div><button className={`toggle ${notifications ? 'on' : ''}`} onClick={() => setNotifications(!notifications)}><i /></button></div>
   </section>
   if (section === 'requests') return <section className="page-panel"><header><h1>新的朋友</h1><p>{requests.filter((item) => item.status === 'pending').length} 个待处理申请</p></header>{error && <div className="page-error">{error}</div>}<div className="directory-list">{requests.length === 0 ? <EmptyState icon={<UserPlus />} title="暂无好友申请" text="收到新的好友申请后会显示在这里" /> : requests.map((request) => <div className="request-row" key={request.id}><Avatar initials={request.name[0]} color={colorFor(request.userId)} /><div><strong>{request.name}</strong><span>{request.message}</span><small>用户 ID：{request.userId}</small></div>{request.status === 'pending' ? <div className="request-actions"><button disabled={busy} onClick={() => handleRequest(request.id, 'reject')}>忽略</button><button className="primary-button" disabled={busy} onClick={() => handleRequest(request.id, 'accept')}>接受</button></div> : <em>{request.status === 'accepted' ? '已添加' : '已忽略'}</em>}</div>)}</div></section>
@@ -641,7 +762,9 @@ async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUr
   livekitRoom.on(RoomEvent.TrackUnsubscribed, (track) => detachTrack(track))
   livekitRoom.on(RoomEvent.Disconnected, removeAllMedia)
   await livekitRoom.connect(result.livekitUrl, result.token)
-  await livekitRoom.startAudio().catch((reason: unknown) => console.warn('MoChat audio playback start failed', reason))
+  // LiveKit 2.x 之后 Room.startAudio() 已经被标记为 deprecated；
+  // 用 Room.remoteParticipants 已订阅的轨道直接 attach，本侧开关麦克风 / 摄像头即可。
+  // 浏览器的 autoplay policy: 进入房间前如果用户没有交互，音频会被阻断，这里适当容错。
   for (const participant of livekitRoom.remoteParticipants.values()) {
     for (const publication of participant.audioTrackPublications.values()) {
       if (publication.track) attachRemoteAudio(publication.track)
@@ -660,7 +783,7 @@ async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUr
   return livekitRoom
 }
 
-function CallModal({ session, conversation, kind, onClose }: { session: Session; conversation: Conversation; kind: 'voice' | 'video'; onClose: () => void }) {
+function CallModal({ session, conversation, kind, onClose, signaling }: { session: Session; conversation: Conversation; kind: 'voice' | 'video'; onClose: () => void; signaling: CallSignaling }) {
   const [status, setStatus] = useState('正在请求通话服务…')
   const [callSession, setCallSession] = useState<CallSession | null>(null)
   const [room, setRoom] = useState<Room | null>(null)
@@ -674,7 +797,7 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
       try {
         const result = conversation.kind === 'group'
           ? await api.startGroupCall(session.sessionId, conversation.targetId)
-          : await api.startPrivateCall(session.sessionId, conversation.targetId, kind)
+          : await api.startPrivateCall(session.sessionId, conversation.targetId)
         if (cancelled) return
         setCallSession(result)
         if (!result.token || !result.livekitUrl) {
@@ -701,7 +824,43 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
     }
   }, [conversation.kind, conversation.targetId, kind, session.sessionId])
 
+  // 监听被叫的信令回复：accept / reject / hangup。
+  useEffect(() => {
+    if (conversation.kind !== 'private') return
+    const handler = (event: MessageEvent) => {
+      let payload: Record<string, unknown>
+      try { payload = JSON.parse(String(event.data)) as Record<string, unknown> } catch { return }
+      if (payload.type === 'call_accept' && String(payload.fromUserId) === String(conversation.targetId)) {
+        setStatus('对方已接听，通话进行中')
+        return
+      }
+      if (payload.type === 'call_reject' && String(payload.fromUserId) === String(conversation.targetId)) {
+        setStatus('对方已拒绝通话')
+        setTimeout(() => onClose(), 1200)
+        return
+      }
+      if (payload.type === 'call_hangup' && String(payload.fromUserId) === String(conversation.targetId)) {
+        setStatus('对方已挂断')
+        setTimeout(() => onClose(), 800)
+      }
+    }
+    const raw = signaling.socket
+    raw?.addEventListener('message', handler)
+    return () => raw?.removeEventListener('message', handler)
+  }, [conversation.kind, conversation.targetId, onClose, signaling])
+
   async function hangup() {
+    if (callSession?.roomName && conversation.kind === 'private') {
+      // 主叫挂断后通知被叫，让对方也关闭 IncomingCallModal。
+      try {
+        signaling.send({
+          fromUserId: Number(session.userId),
+          toUserId: Number(conversation.targetId),
+          type: 'call_hangup',
+          roomName: callSession.roomName,
+        })
+      } catch {/* 信令断开就忽略 */}
+    }
     if (callSession?.roomName && conversation.kind === 'group') {
       await api.leaveGroupCall(session.sessionId, callSession.roomName).catch(() => undefined)
     }
@@ -718,12 +877,14 @@ function IncomingCallModal({
   connectedSession,
   onConnectedConsumed,
   onClose,
+  signaling,
 }: {
   session: Session
   incoming: IncomingCall
   connectedSession: CallSession | null
   onConnectedConsumed: () => void
   onClose: () => void
+  signaling: CallSignaling
 }) {
   const [status, setStatus] = useState('收到通话邀请')
   const [room, setRoom] = useState<Room | null>(null)
@@ -769,19 +930,48 @@ function IncomingCallModal({
         setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
         return
       }
-      const result = await api.signalPrivateCall(session.sessionId, incoming.fromUserId, 'call_accept', incoming.roomName)
-      const sessionToConnect = { ...result, roomName: result.roomName || incoming.roomName }
-      setStatus('正在连接 LiveKit 房间…')
-      const livekitRoom = await connectLiveKitRoom(sessionToConnect, callKind, { local: localVideoRef.current, remote: remoteVideoRef.current })
-      setRoom(livekitRoom)
-      setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
+      // 私聊接听：通过 WebSocket 把 call_accept 发给后端，后端转发给主叫，
+      // 同时给本被叫回 call_accepted_with_token（带 token），那由外层 onSignal 处理后传入 connectedSession，
+      // 这里 useEffect 会监听 connectedSession，调用 connectLiveKitRoom 进房。
+      signaling.send({
+        fromUserId: Number(session.userId),
+        toUserId: Number(incoming.fromUserId),
+        type: 'call_accept',
+        roomName: incoming.roomName,
+      })
+      setStatus('已发送接听信号，等待 LiveKit 令牌…')
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '接听失败')
       setAccepting(false)
     }
   }
 
+  async function reject() {
+    try {
+      if (incoming.type !== 'call_group_started' && !room) {
+        signaling.send({
+          fromUserId: Number(session.userId),
+          toUserId: Number(incoming.fromUserId),
+          type: 'call_reject',
+          roomName: incoming.roomName,
+        })
+      }
+    } catch {/* 信令断开也忽略，直接关 modal */}
+    await close()
+  }
+
   async function close() {
+    if (room && incoming.type !== 'call_group_started') {
+      // 挂断后通知对方，让对方知道通话结束、自动收起通话界面。
+      try {
+        signaling.send({
+          fromUserId: Number(session.userId),
+          toUserId: Number(incoming.fromUserId),
+          type: 'call_hangup',
+          roomName: incoming.roomName,
+        })
+      } catch {/* 信令断开忽略 */}
+    }
     if (room && incoming.type === 'call_group_started') {
       await api.leaveGroupCall(session.sessionId, incoming.roomName).catch(() => undefined)
     }
@@ -789,7 +979,7 @@ function IncomingCallModal({
     onClose()
   }
 
-  return <div className="call-backdrop"><section className={`call-card ${callKind === 'video' ? 'video-call-card' : ''}`}>{callKind === 'video' ? <div className="call-video-stage"><div className="call-video-remote" ref={remoteVideoRef}><span>等待对方视频…</span></div><div className="call-video-local" ref={localVideoRef}><span>本地视频</span></div></div> : <div className="call-pulse"><Avatar initials={incoming.type === 'call_group_started' ? '群' : '来'} color="#d48758" size="lg" /></div>}<h2>{incoming.type === 'call_group_started' ? `群聊 ${incoming.groupId}` : `用户 ${incoming.fromUserId}`}</h2><p>邀请你进行{callKind === 'video' ? '视频' : '语音'}通话</p><div className="call-status"><Wifi />{status}</div><div className="call-room">房间：{incoming.roomName}</div><div className="call-buttons">{!room && <button className="primary-button" disabled={accepting} onClick={accept} title="接听"><Phone /></button>}<button className="hangup" onClick={close} title={room ? '挂断' : '拒绝'}><Phone /></button></div></section></div>
+  return <div className="call-backdrop"><section className={`call-card ${callKind === 'video' ? 'video-call-card' : ''}`}>{callKind === 'video' ? <div className="call-video-stage"><div className="call-video-remote" ref={remoteVideoRef}><span>等待对方视频…</span></div><div className="call-video-local" ref={localVideoRef}><span>本地视频</span></div></div> : <div className="call-pulse"><Avatar initials={incoming.type === 'call_group_started' ? '群' : '来'} color="#d48758" size="lg" /></div>}<h2>{incoming.type === 'call_group_started' ? `群聊 ${incoming.groupId}` : `用户 ${incoming.fromUserId}`}</h2><p>邀请你进行{callKind === 'video' ? '视频' : '语音'}通话</p><div className="call-status"><Wifi />{status}</div><div className="call-room">房间：{incoming.roomName}</div><div className="call-buttons">{!room && <button className="primary-button" disabled={accepting} onClick={accept} title="接听"><Phone /></button>}{!room && <button className="hangup" onClick={reject} title="拒绝"><Phone /></button>}{room && <button className="hangup" onClick={close} title="挂断"><Phone /></button>}</div></section></div>
 }
 
 function MainApp({ session, onLogout }: { session: Session; onLogout: () => void }) {
@@ -807,6 +997,8 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [callSignalStatus, setCallSignalStatus] = useState<'connecting' | 'ready' | 'disconnected'>(session.demo ? 'disconnected' : 'connecting')
   const latestSeqRef = useRef(new Map<string, number>())
   const pendingMessagesRef = useRef(new Map<string, { conversationId: EntityId; text: string; mediaUrl?: string; fileName?: string }>())
+  const selectedRef = useRef<EntityId | null>(null)
+  useEffect(() => { selectedRef.current = selected }, [selected])
   const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
   const refreshConversationPreview = useCallback((conversationId: EntityId, latest?: ChatMessage) => {
@@ -816,6 +1008,24 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
       : conversation
     ))
   }, [])
+
+// 计算 unread：用 “会话里最大消息 seq - 本地已读 seq 存档” 推断当前未读数。
+// localStorage key: `mochat.read-seq.${sessionId}.${conversationId}`。
+// 历史拉取 / 实时 delivery 进入会话时同步推到最新 seq。
+// persistReadSeq 在 markConversationRead 与 upsertConversationMessage 里直接内联过,
+// 这里的 helper 只保留语义入口，避免 noUnusedLocals 时噪音过大。
+const persistReadSeq = useCallback((conversationId: EntityId, seq: number) => {
+  const key = `mochat.read-seq.${session.sessionId}.${conversationId}`
+  const prev = Number(localStorage.getItem(key) || '0')
+  if (seq > prev) localStorage.setItem(key, String(seq))
+}, [session.sessionId])
+const computeUnread = useCallback((conversationId: EntityId, latestSeq: number) => {
+  const key = `mochat.read-seq.${session.sessionId}.${conversationId}`
+  const readSeq = Number(localStorage.getItem(key) || '0')
+  return Math.max(0, latestSeq - readSeq)
+}, [session.sessionId])
+void persistReadSeq
+void computeUnread
   const upsertConversationMessage = useCallback((message: ChatMessage) => {
     setMessages((current) => {
       const conversationMessages = current.filter((item) => String(item.conversationId) === String(message.conversationId))
@@ -825,11 +1035,39 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
       return [...others, ...nextConversation]
     })
     refreshConversationPreview(message.conversationId, message)
-  }, [refreshConversationPreview])
+    // 接收到（或发出后回 ack）带 seq 的消息时，顺手更新该会话的 unread。
+    if (message.seq != null) {
+      const seqNumber = Number(message.seq)
+      if (!Number.isFinite(seqNumber) || seqNumber <= 0) return
+      const lastRead = Number(localStorage.getItem(`mochat.read-seq.${session.sessionId}.${message.conversationId}`) || '0')
+      const unread = Math.max(0, seqNumber - lastRead)
+      setConversations((current) => current.map((c) => String(c.id) === String(message.conversationId) ? { ...c, unread } : c))
+    }
+  }, [refreshConversationPreview, session.sessionId])
+
+// 进入某个会话查看时，把该会话的 read-seq 推到当前最新 seq，并把 unread 清 0。
+const markConversationRead = useCallback((conversationId: EntityId, latestSeq: number) => {
+  const key = `mochat.read-seq.${session.sessionId}.${conversationId}`
+  const prev = Number(localStorage.getItem(key) || '0')
+  if (latestSeq > prev) localStorage.setItem(key, String(latestSeq))
+  setConversations((current) => current.map((c) => String(c.id) === String(conversationId) ? { ...c, unread: 0 } : c))
+}, [session.sessionId])
   const loadMessages = useCallback(async () => {
     if (session.demo || !selectedConversation) return
     const response = await api.history(session.sessionId, selectedConversation.id)
-    const remoteMessages = (response.items ?? []).map((item) => {
+    let rawItems = response.items ?? []
+    // 私聊历史由主进程 X25519+AES-GCM 批量解密，解出来的明文以 decryptedText 形式合并进 item。
+    if (selectedConversation.kind === 'private' && window.mochatDesktop?.decryptHistory) {
+      const peerUsername = await peerUsernameForTarget(session, selectedConversation.targetId)
+      if (peerUsername) {
+        rawItems = await window.mochatDesktop.decryptHistory({
+          items: rawItems as unknown as Array<Record<string, unknown>>,
+          kind: 'private',
+          peerUsername,
+        }) as unknown as typeof rawItems
+      }
+    }
+    const remoteMessages = rawItems.map((item) => {
       const historyItem: BackendHistoryItem = {
         ...item,
         conversationId: selectedConversation.id,
@@ -837,8 +1075,14 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
       const delivery = toHistoryDelivery(historyItem, selectedConversation.kind)
       const privateFromMe = selectedConversation.kind === 'private' && String(delivery.toUid) === String(selectedConversation.targetId)
       const message = deliveryToChatMessage(delivery, session, privateFromMe)
+      // 私聊历史已经用 E2EE 解密拿到 decryptedText，这里直接覆盖显示文本；
+      // 群聊用 plaintext，extractTextFromDecodedPayload 自然能拿。
+      if (selectedConversation.kind === 'private') {
+        const dt = (item as { decryptedText?: string }).decryptedText
+        if (dt) return { ...message, text: dt }
+      }
       return selectedConversation.kind === 'private'
-        ? { ...message, text: extractTextFromDecodedPayload({ contents: delivery.contents as unknown[] }) }
+        ? { ...message, text: extractTextFromDecodedPayload({ contents: delivery.contents as unknown[] }) || message.text }
         : message
     })
     latestSeqRef.current.set(String(selectedConversation.id), Number(remoteMessages.at(-1)?.seq ?? 0))
@@ -847,12 +1091,30 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
       return [...otherMessages, ...remoteMessages]
     })
     refreshConversationPreview(selectedConversation.id, remoteMessages.at(-1))
+    const lastSeq = Number(remoteMessages.at(-1)?.seq ?? 0)
+    // 进入会话后把未读清 0、把 read-seq 推到最新，并给服务端发一个 RECEIVE_ACK。
+    if (lastSeq > 0) markConversationRead(selectedConversation.id, lastSeq)
     await window.mochatDesktop?.chat.sendReceiveAck({
       sessionId: session.sessionId,
       conversationId: selectedConversation.id,
-      latestReceivedSeq: remoteMessages.at(-1)?.seq ?? 0,
+      latestReceivedSeq: lastSeq,
     }).catch(() => undefined)
-  }, [refreshConversationPreview, selectedConversation, session])
+    // 私聊：顺手查对方已收 seq，把我已发出且对方已收的消息置为 read，让状态徽标更准确。
+    if (selectedConversation.kind === 'private') {
+      try {
+        const peerSeqResp = await api.privatePeerReceivedSeq(session.sessionId, selectedConversation.id)
+        const peerReceived = Number(peerSeqResp.latestReceivedSeq || 0)
+        if (peerReceived > 0) {
+          setMessages((current) => current.map((message) =>
+            String(message.conversationId) === String(selectedConversation.id)
+              && message.fromMe
+              && message.seq != null
+              && Number(message.seq) <= peerReceived
+              ? { ...message, status: 'read' } : message))
+        }
+      } catch { /* 对方已收查询失败不影响主体 */ }
+    }
+  }, [refreshConversationPreview, selectedConversation, session, markConversationRead])
   const loadDirectory = useCallback(async (cancelled?: () => boolean) => {
     setDirectoryLoading(true)
     setDirectoryError('')
@@ -866,6 +1128,12 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
         ...(friendsResponse.friends ?? []).map(friendToConversation),
         ...(groupsResponse.groups ?? []).map(groupToConversation),
       ]
+      // 把好友 userId → username 缓存下来，供后续私聊 E2EE 反查对方 username 用。
+      try {
+        const map: Record<string, string> = {}
+        for (const friend of friendsResponse.friends ?? []) map[String(friend.userId)] = friend.username
+        localStorage.setItem(`mochat.directory.usernames.${session.sessionId}`, JSON.stringify(map))
+      } catch {/* storage 异常忽略 */}
       setConversations(remoteConversations)
       setSelected((current) => remoteConversations.some((item) => item.id === current) ? current : remoteConversations[0]?.id ?? null)
       setMessages([])
@@ -883,10 +1151,12 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     if (session.demo) return
     let cancelled = false
     Promise.resolve().then(() => loadDirectory(() => cancelled))
+    // 登录成功后把本机用户名告诉主进程，主进程做私聊 E2EE 时需要它来查 X25519 私钥。
+    window.mochatDesktop?.setUser({ username: session.username, userId: session.userId }).catch(() => undefined)
     return () => {
       cancelled = true
     }
-  }, [loadDirectory, session.demo])
+  }, [loadDirectory, session.demo, session.username, session.userId])
   useEffect(() => {
     if (session.demo || !window.mochatDesktop?.chat) return
     setChatStatus('connecting')
@@ -929,6 +1199,10 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
         const chatMessage = deliveryToChatMessage(delivery, session)
         latestSeqRef.current.set(String(chatMessage.conversationId), Number(delivery.seq))
         upsertConversationMessage(chatMessage)
+        // 如果当前正在看这个会话，顺手把未读清 0；否则保持 unread 累计。
+        if (String(selectedRef.current) === String(delivery.conversationId) && delivery.seq) {
+          markConversationRead(delivery.conversationId, Number(delivery.seq))
+        }
         window.mochatDesktop?.chat.sendReceiveAck({
           sessionId: session.sessionId,
           conversationId: delivery.conversationId,
@@ -1049,12 +1323,17 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
           text,
         })
       } else {
+        // 私聊：主进程会拿 fromUsername/peerUsername 查 seed 私钥+对端公钥做 X25519+AES-GCM 加密。
+        // 找不到 peerUsername（对方不在 seed 列表里）时退回 base64 兜底链路。
+        const peerUsername = await peerUsernameForTarget(session, selectedConversation.targetId)
         await window.mochatDesktop?.chat.sendPrivateText({
           sessionId: session.sessionId,
           clientMsgId,
           conversationId: selectedConversation.id,
           toUid: selectedConversation.targetId,
           text,
+          fromUsername: session.username,
+          peerUsername: peerUsername || '',
         })
       }
     }
@@ -1070,9 +1349,9 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
     {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} onDetails={() => setDetailsConversation(selectedConversation)} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
     <div className={`connection-pill ${session.demo || chatStatus !== 'connected' ? 'demo' : ''}`}>{session.demo || chatStatus !== 'connected' ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : chatStatus === 'connected' ? (callSignalStatus === 'ready' ? '聊天与通话已连接' : '聊天已连接') : chatStatus === 'reconnecting' ? '聊天服务重连中' : chatStatus === 'connecting' ? '聊天服务连接中' : '聊天服务已断开'}<ChevronDown /></div>
-    {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
-    {detailsConversation && <ConversationDetailsModal session={session} conversation={detailsConversation} contacts={conversations.filter((item) => item.kind === 'private')} onRefreshDirectory={() => loadDirectory()} onClose={() => setDetailsConversation(null)} />}
-    {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
+    {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} signaling={signaling} />}
+    {detailsConversation && <ConversationDetailsModal conversation={detailsConversation} contacts={conversations.filter((item) => item.kind === 'private')} onRefreshDirectory={() => loadDirectory()} onClose={() => setDetailsConversation(null)} />}
+    {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} signaling={signaling} />}
   </main>
 }
 

@@ -6,9 +6,11 @@ const MAGIC = 0x4d4f4348
 const VERSION = 1
 const SERIALIZER = 1
 const HEADER_LENGTH = 11
-const HEARTBEAT_INTERVAL_MS = 15000
+// 后端 access-gateway 配置 heartbeat-interval:10s，heartbeat-timeout:60s。
+// 客户端心跳间隔取 9s，留 1s 余量给网络抖动；重连采用指数回退到 30s。
+const HEARTBEAT_INTERVAL_MS = 9000
 const RECONNECT_BASE_DELAY_MS = 1000
-const RECONNECT_MAX_DELAY_MS = 8000
+const RECONNECT_MAX_DELAY_MS = 30000
 
 const MsgType = {
   CLIENT_HEARTBEAT: 1,
@@ -175,8 +177,18 @@ function parseGatewayUrl(raw) {
   }
 }
 
+// 服务器目前使用自签名证书（access-gateway 默认 TLS_SELF_SIGNED=true）。
+// 客户端在开发期统一放行自签证书：本地回环、本机内网 IP、远程部署服务器（103.40.14.14）都接受。
+// 如果将来换成权威 CA 证书，可以把 ALLOW_SELF_SIGNED_HOSTS 设为只含 localhost。
+const ALLOW_SELF_SIGNED_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
+const REMOTE_DEPLOY_HOSTS = new Set(['103.40.14.14'])
+
 function shouldAllowSelfSigned(hostname) {
-  return ['localhost', '127.0.0.1', '::1'].includes(hostname)
+  if (ALLOW_SELF_SIGNED_HOSTS.has(hostname)) return true
+  if (REMOTE_DEPLOY_HOSTS.has(hostname)) return true
+  // 本地办公室网段（192.168 / 10. / 172.16-31）也允许自签，方便局域网联调。
+  if (/^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname)) return true
+  return false
 }
 
 class ChatGatewayClient {
@@ -230,11 +242,16 @@ class ChatGatewayClient {
     this.clearReconnect()
     this.stopHeartbeat()
     this.buffer = Buffer.alloc(0)
+    // 后端 access-gateway 的 NettyChatServer.buildTls13Context 强制 TLSv1.3，
+    // 客户端必须使用 TLSv1.3 才能握手成功，TLSv1.2 会被直接拒绝。
+    const allowSelfSigned = shouldAllowSelfSigned(this.connectOptions.host)
     const socket = tls.connect({
       host: this.connectOptions.host,
       port: this.connectOptions.port,
-      rejectUnauthorized: !shouldAllowSelfSigned(this.connectOptions.host),
-      minVersion: 'TLSv1.2',
+      rejectUnauthorized: !allowSelfSigned,
+      minVersion: 'TLSv1.3',
+      maxVersion: 'TLSv1.3',
+      ciphers: 'TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256',
     })
     this.socket = socket
     socket.once('secureConnect', () => {
@@ -336,25 +353,19 @@ class ChatGatewayClient {
   }
 }
 
-function randomNonceBase64() {
-  return crypto.randomBytes(12).toString('base64')
-}
-
-function textCiphertextBase64(text) {
-  return Buffer.from(text, 'utf8').toString('base64')
-}
-
 function mediaTypeCode(type) {
   return { image: 0, video: 1, audio: 2, file: 3 }[type] ?? 3
 }
 
-function buildPrivateTextPayload({ sessionId, clientMsgId, conversationId, toUid, text }) {
+// 私聊文本：主进程已经把 text 用 X25519+AES-256-GCM 加密得到 { nonceBase64, ciphertextBase64 }，
+// 这里不再在 ChatGatewayClient 层做加密，只负责把它打包成 protobuf EncryptedText。
+function buildPrivateTextPayload({ sessionId, clientMsgId, conversationId, toUid, nonceBase64, ciphertextBase64 }) {
   return {
     sessionId,
     clientMsgId: String(clientMsgId),
     conversationId: String(conversationId),
     toUid: String(toUid),
-    contents: [{ encryptedText: { nonce: randomNonceBase64(), ciphertext: textCiphertextBase64(text) } }],
+    contents: [{ encryptedText: { nonce: nonceBase64, ciphertext: ciphertextBase64 } }],
   }
 }
 

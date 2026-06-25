@@ -160,7 +160,7 @@ export function decodeErrorResponse(payload: unknown) {
   return payload as ChatGatewayError
 }
 
-export function extractTextFromDecodedPayload(payload: Record<string, unknown>) {
+export function extractTextFromDecodedPayload(payload: Record<string, unknown>): string {
   const contents = Array.isArray(payload.contents) ? payload.contents as Array<Record<string, unknown>> : []
   for (const content of contents) {
     const plain = content.plainText as { text?: string } | undefined

@@ -74,7 +74,15 @@ export interface ChatMessage {
   seq?: EntityId
   clientMsgId?: EntityId
   mediaUrl?: string
+  thumbnailUrl?: string
   fileName?: string
+  mimeType?: string
+  mediaType?: 'image' | 'video' | 'audio' | 'file'
+  fileSize?: number | string
+  width?: number
+  height?: number
+  duration?: number
+  waveformData?: string
 }
 
 export interface BackendTextMessage {

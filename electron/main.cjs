@@ -138,6 +138,10 @@ function createWindow() {
   })
 
   window.once('ready-to-show', () => window.show())
+  // 提前捕获 webContents.id：window 'closed' 事件触发时 BrowserWindow 及其
+  // webContents 都已被销毁，再访问 window.webContents.id 会抛
+  // "Object has been destroyed"，所以这里用闭包变量持有 id。
+  const webContentsId = window.webContents.id
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url)
     return { action: 'deny' }
@@ -178,9 +182,9 @@ function createWindow() {
   })
 
   window.on('closed', () => {
-    const client = chatClients.get(window.webContents.id)
+    const client = chatClients.get(webContentsId)
     client?.disconnect()
-    chatClients.delete(window.webContents.id)
+    chatClients.delete(webContentsId)
   })
 
   loadRenderer(window)

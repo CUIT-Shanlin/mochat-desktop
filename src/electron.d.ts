@@ -11,6 +11,18 @@ declare global {
         mediaServer?: string | null
       }
       selectFiles: () => Promise<string[]>
+      http: {
+        request: (payload: {
+          url: string
+          method?: string
+          headers?: Record<string, string>
+          body?: string
+        }) => Promise<{
+          ok: boolean
+          status: number
+          text: string
+        }>
+      }
       chat: {
         connect: (payload: { gatewayUrl: string }) => Promise<{ ok: boolean }>
         disconnect: () => Promise<{ ok: boolean }>

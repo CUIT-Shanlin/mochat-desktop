@@ -84,11 +84,11 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit): Pr
   if (hasBody && !headers.has('Content-Type') && !(init?.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json')
   }
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await desktopHttpRequest(`${baseUrl}${path}`, {
     ...init,
     headers,
   })
-  const text = await response.text().catch(() => '')
+  const text = response.text
   const body = parseJsonPreservingLargeIntegers(text)
   const errorMessage = typeof body.error === 'string' ? body.error : typeof body.message === 'string' ? body.message : `请求失败 (${response.status})`
   if (response.status === 401 || errorMessage.toLowerCase().includes('session invalid') || errorMessage.toLowerCase().includes('invalid session')) {
@@ -103,6 +103,28 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit): Pr
 const apiRequest = <T>(path: string, init?: RequestInit) => request<T>(getApiBaseUrl(), path, init)
 const callRequest = <T>(path: string, init?: RequestInit) => request<T>(getCallBaseUrl(), path, init)
 const mediaRequest = <T>(path: string, init?: RequestInit) => request<T>(getMediaBaseUrl(), path, init)
+
+async function desktopHttpRequest(url: string, init?: RequestInit) {
+  const headerEntries = Object.fromEntries(new Headers(init?.headers ?? undefined).entries())
+  if (window.mochatDesktop?.http?.request && !(init?.body instanceof FormData)) {
+    return window.mochatDesktop.http.request({
+      url,
+      method: init?.method,
+      headers: headerEntries,
+      body: typeof init?.body === 'string' ? init.body : undefined,
+    })
+  }
+
+  const response = await fetch(url, {
+    ...init,
+    headers: headerEntries,
+  })
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: await response.text().catch(() => ''),
+  }
+}
 
 function parseJsonPreservingLargeIntegers(text: string) {
   if (!text) return {}

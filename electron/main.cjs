@@ -289,6 +289,19 @@ ipcMain.handle('dialog:select-files', async () => {
   return result.canceled ? [] : result.filePaths
 })
 
+ipcMain.handle('http:request', async (_event, payload) => {
+  const response = await fetch(payload.url, {
+    method: payload.method || 'GET',
+    headers: payload.headers || {},
+    body: payload.body,
+  })
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: await response.text(),
+  }
+})
+
 ipcMain.handle('chat:connect', async (event, payload) => {
   chatClientFor(event.sender).connect(payload)
   return { ok: true }

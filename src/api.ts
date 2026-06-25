@@ -104,6 +104,8 @@ export const api = {
     })
   },
   createGroup: (sessionId: string, name: string) => apiRequest<{ group: BackendGroup }>('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
+  inviteGroupMember: (sessionId: string, groupId: EntityId, memberUserId: EntityId) =>
+    apiRequest<{ groupId: EntityId; userId: EntityId; status: string }>(`/groups/${groupId}/members`, { method: 'POST', body: JSON.stringify({ sessionId, memberUserId }) }),
   sendGroupJoinRequest: (sessionId: string, groupId: EntityId, sign = '') => apiRequest<{ request: BackendGroupJoinRequest }>(`/groups/${groupId}/join-requests`, { method: 'POST', body: JSON.stringify({ sessionId, sign }) }),
   groupJoinRequests: (sessionId: string, groupId: EntityId) => apiRequest<{ requests?: BackendGroupJoinRequest[] }>(`/groups/${groupId}/join-requests?sessionId=${encodeURIComponent(sessionId)}`),
   handleGroupJoinRequest: (sessionId: string, groupId: EntityId, requestId: EntityId, action: 'accept' | 'reject') => apiRequest<{ request: BackendGroupJoinRequest }>(`/groups/${groupId}/join-requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),

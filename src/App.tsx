@@ -172,7 +172,21 @@ function ConversationList({ items, selected, onSelect }: { items: Conversation[]
   </aside>
 }
 
-function Chat({ conversation, messages, serviceMode, onSend, onCall }: { conversation: Conversation; messages: ChatMessage[]; serviceMode: boolean; onSend: (text: string, attachments: File[]) => Promise<void>; onCall: (kind: 'voice' | 'video') => void }) {
+function Chat({
+  conversation,
+  messages,
+  serviceMode,
+  onSend,
+  onCall,
+  onDetails,
+}: {
+  conversation: Conversation
+  messages: ChatMessage[]
+  serviceMode: boolean
+  onSend: (text: string, attachments: File[]) => Promise<void>
+  onCall: (kind: 'voice' | 'video') => void
+  onDetails: () => void
+}) {
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<File[]>([])
   const [sending, setSending] = useState(false)
@@ -197,7 +211,7 @@ function Chat({ conversation, messages, serviceMode, onSend, onCall }: { convers
     }
   }
   return <section className="chat-panel">
-    <header className="chat-header"><div className="chat-person"><Avatar initials={conversation.initials} color={conversation.color} size="sm" online={conversation.online} /><span><strong>{conversation.name}</strong><small>{conversation.kind === 'group' ? '群组会话' : serviceMode ? '已连接' : conversation.online ? '在线' : '离线'}</small></span></div><div className="chat-actions"><button onClick={() => onCall('voice')} title="语音通话"><Phone /></button><button onClick={() => onCall('video')} title="视频通话"><Video /></button><button title="会话详情"><MoreVertical /></button></div></header>
+    <header className="chat-header"><div className="chat-person"><Avatar initials={conversation.initials} color={conversation.color} size="sm" online={conversation.online} /><span><strong>{conversation.name}</strong><small>{conversation.kind === 'group' ? '群组会话' : serviceMode ? '已连接' : conversation.online ? '在线' : '离线'}</small></span></div><div className="chat-actions"><button onClick={() => onCall('voice')} title="语音通话"><Phone /></button><button onClick={() => onCall('video')} title="视频通话"><Video /></button><button onClick={onDetails} title="会话详情"><MoreVertical /></button></div></header>
     <div className="message-area">
       <div className="date-divider"><span>今天</span></div>
       {current.length === 0 ? <EmptyState icon={<MessageSquare />} title="开始聊天" text={`向 ${conversation.name} 发送第一条消息`} /> : current.map((message) => <div key={message.id} className={`message-row ${message.fromMe ? 'mine' : ''}`}>
@@ -214,6 +228,67 @@ function Chat({ conversation, messages, serviceMode, onSend, onCall }: { convers
       <button className="send-button" disabled={sending || (!draft.trim() && !attachments.length)} onClick={send}><Send /><span>{sending ? '发送中' : '发送'}</span></button>
     </footer>
   </section>
+}
+
+function ConversationDetailsModal({
+  session,
+  conversation,
+  contacts,
+  onClose,
+  onRefreshDirectory,
+}: {
+  session: Session
+  conversation: Conversation
+  contacts: Conversation[]
+  onClose: () => void
+  onRefreshDirectory: () => Promise<void>
+}) {
+  const [memberUserId, setMemberUserId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const isOwner = conversation.kind === 'group' && String(conversation.ownerUserId) === String(session.userId)
+
+  async function inviteMember() {
+    const targetUserId = memberUserId.trim()
+    if (!targetUserId) {
+      setError('请选择或输入要拉入群的用户 ID')
+      return
+    }
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      await api.inviteGroupMember(session.sessionId, conversation.targetId, targetUserId)
+      setMessage('已拉入群聊')
+      setMemberUserId('')
+      await onRefreshDirectory()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '拉人入群失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <Modal title={conversation.kind === 'group' ? '群聊详情' : '个人详情'} onClose={onClose} footer={<button className="ghost-button" disabled={busy} onClick={onClose}>关闭</button>}>
+    <div className="details-panel">
+      <div className="details-hero">
+        <Avatar initials={conversation.initials} color={conversation.color} size="lg" online={conversation.online} />
+        <div><strong>{conversation.name}</strong><span>{conversation.kind === 'group' ? `群 ID：${conversation.targetId}` : `用户 ID：${conversation.targetId}`}</span>{conversation.kind === 'group' && <small>群主：{conversation.ownerUserId}</small>}</div>
+      </div>
+      {conversation.kind === 'group' ? <div className="details-section">
+        <h3>拉好友入群</h3>
+        {isOwner ? <>
+          <label>选择好友<select value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)}><option value="">选择一个联系人</option>{contacts.map((contact) => <option key={String(contact.targetId)} value={String(contact.targetId)}>{contact.name}（{contact.targetId}）</option>)}</select></label>
+          <label>或输入用户 ID<input value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)} placeholder="输入好友用户 ID" /></label>
+          {message && <div className="form-success">{message}</div>}
+          {error && <div className="form-error">{error}</div>}
+          <button className="primary-button" disabled={busy} onClick={inviteMember}>{busy ? '拉人中…' : '拉入群聊'}</button>
+        </> : <p>当前只有群主可以拉好友入群。</p>}
+        <p className="muted-note">成员列表接口后端还没提供，这里先展示基础信息和拉人能力。</p>
+      </div> : <div className="details-section"><h3>联系人信息</h3><p>会话 ID：{conversation.id}</p><p>状态：{conversation.online ? '在线' : '离线/未知'}</p></div>}
+    </div>
+  </Modal>
 }
 
 function Directory({
@@ -625,6 +700,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [directoryLoading, setDirectoryLoading] = useState(false)
   const [directoryError, setDirectoryError] = useState('')
   const [call, setCall] = useState<'voice' | 'video' | null>(null)
+  const [detailsConversation, setDetailsConversation] = useState<Conversation | null>(null)
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null)
   const [connectedIncomingCall, setConnectedIncomingCall] = useState<CallSession | null>(null)
   const [callSignalStatus, setCallSignalStatus] = useState<'connecting' | 'ready' | 'disconnected'>(session.demo ? 'disconnected' : 'connecting')
@@ -781,9 +857,10 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   return <main className="app-shell">
     <WindowControls />
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
-    {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
+    {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} onDetails={() => setDetailsConversation(selectedConversation)} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
     <div className={`connection-pill ${session.demo || callSignalStatus !== 'ready' ? 'demo' : ''}`}>{session.demo || callSignalStatus !== 'ready' ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : callSignalStatus === 'ready' ? '服务已连接' : callSignalStatus === 'connecting' ? '通话信令连接中' : '通话信令已断开'}<ChevronDown /></div>
     {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
+    {detailsConversation && <ConversationDetailsModal session={session} conversation={detailsConversation} contacts={conversations.filter((item) => item.kind === 'private')} onRefreshDirectory={() => loadDirectory()} onClose={() => setDetailsConversation(null)} />}
     {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
   </main>
 }

@@ -472,14 +472,12 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
 function IncomingCallModal({
   session,
   incoming,
-  signaling,
   connectedSession,
   onConnectedConsumed,
   onClose,
 }: {
   session: Session
   incoming: IncomingCall
-  signaling: CallSignaling
   connectedSession: CallSession | null
   onConnectedConsumed: () => void
   onClose: () => void
@@ -525,13 +523,12 @@ function IncomingCallModal({
         setStatus('语音通话已连接')
         return
       }
-      signaling.send({
-        fromUserId: session.userId,
-        toUserId: incoming.fromUserId,
-        type: 'call_accept',
-        roomName: incoming.roomName,
-      })
-      setStatus('已接听，正在等待通话令牌…')
+      const result = await api.signalPrivateCall(session.sessionId, incoming.fromUserId, 'call_accept', incoming.roomName)
+      const sessionToConnect = { ...result, roomName: result.roomName || incoming.roomName }
+      setStatus('正在连接 LiveKit 房间…')
+      const livekitRoom = await connectLiveKitRoom(sessionToConnect, 'voice')
+      setRoom(livekitRoom)
+      setStatus('语音通话已连接')
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '接听失败')
       setAccepting(false)
@@ -716,7 +713,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
     <div className={`connection-pill ${session.demo || callSignalStatus !== 'ready' ? 'demo' : ''}`}>{session.demo || callSignalStatus !== 'ready' ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : callSignalStatus === 'ready' ? '服务已连接' : callSignalStatus === 'connecting' ? '通话信令连接中' : '通话信令已断开'}<ChevronDown /></div>
     {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
-    {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} signaling={signaling} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
+    {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
   </main>
 }
 

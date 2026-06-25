@@ -17,12 +17,12 @@ export function getApiBaseUrl() {
 }
 
 export function getCallBaseUrl() {
-  return configuredValue('callServer', 'mochat.callServer', import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090').replace(/\/$/, '')
+  return normalizeHttpBaseUrl(configuredValue('callServer', 'mochat.callServer', import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090'))
 }
 
 export function getCallWsUrl() {
   const configured = configuredValue('callWs', 'mochat.callWs', import.meta.env.VITE_CALL_WS_URL)
-  return (configured || getCallBaseUrl().replace(/^http/, 'ws')).replace(/\/$/, '')
+  return normalizeWsBaseUrl(configured || getCallBaseUrl().replace(/^http/, 'ws'))
 }
 
 export function getMediaBaseUrl() {
@@ -41,6 +41,29 @@ function normalizeChatGatewayUrl(raw: string) {
   const normalized = raw.replace(/\/$/, '')
   try {
     const url = new URL(normalized.includes('://') ? normalized : `tls://${normalized}`)
+    url.hostname = normalizeChatGatewayHost(url.hostname)
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return normalized
+  }
+}
+
+function normalizeHttpBaseUrl(raw: string) {
+  const normalized = raw.replace(/\/$/, '')
+  try {
+    const url = new URL(normalized)
+    url.hostname = normalizeChatGatewayHost(url.hostname)
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return normalized
+  }
+}
+
+function normalizeWsBaseUrl(raw: string) {
+  const normalized = raw.replace(/\/$/, '')
+  try {
+    const base = normalized.includes('://') ? normalized : `ws://${normalized}`
+    const url = new URL(base)
     url.hostname = normalizeChatGatewayHost(url.hostname)
     return url.toString().replace(/\/$/, '')
   } catch {

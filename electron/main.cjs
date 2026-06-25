@@ -13,6 +13,8 @@ const packagedRendererPort = 39271
 let packagedRendererUrl = ''
 let rendererServer = null
 
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+
 function encodeLaunchConfig(config) {
   return Buffer.from(JSON.stringify(config), 'utf8').toString('base64url')
 }

@@ -411,9 +411,39 @@ function Directory({
 
 async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUrl'>, kind: 'voice' | 'video') {
   if (!result.token || !result.livekitUrl) throw new Error('通话令牌未返回')
-  const { Room } = await import('livekit-client')
+  const { Room, RoomEvent, Track } = await import('livekit-client')
   const livekitRoom = new Room()
+  const remoteAudioElements = new Set<HTMLMediaElement>()
+  type AttachableAudioTrack = { kind: string; attach: () => HTMLMediaElement; detach: () => HTMLMediaElement[] }
+  const attachRemoteAudio = (track: AttachableAudioTrack) => {
+    if (track.kind !== Track.Kind.Audio) return
+    const element = track.attach() as HTMLAudioElement
+    element.autoplay = true
+    element.style.display = 'none'
+    document.body.appendChild(element)
+    remoteAudioElements.add(element)
+    element.play().catch((reason: unknown) => console.warn('MoChat remote audio playback blocked', reason))
+  }
+  const detachRemoteAudio = (track: AttachableAudioTrack) => {
+    for (const element of track.detach()) {
+      remoteAudioElements.delete(element)
+      element.remove()
+    }
+  }
+  const removeAllRemoteAudio = () => {
+    for (const element of remoteAudioElements) element.remove()
+    remoteAudioElements.clear()
+  }
+  livekitRoom.on(RoomEvent.TrackSubscribed, (track) => attachRemoteAudio(track))
+  livekitRoom.on(RoomEvent.TrackUnsubscribed, (track) => detachRemoteAudio(track))
+  livekitRoom.on(RoomEvent.Disconnected, removeAllRemoteAudio)
   await livekitRoom.connect(result.livekitUrl, result.token)
+  await livekitRoom.startAudio().catch((reason: unknown) => console.warn('MoChat audio playback start failed', reason))
+  for (const participant of livekitRoom.remoteParticipants.values()) {
+    for (const publication of participant.audioTrackPublications.values()) {
+      if (publication.track) attachRemoteAudio(publication.track)
+    }
+  }
   await livekitRoom.localParticipant.setMicrophoneEnabled(true)
   if (kind === 'video') await livekitRoom.localParticipant.setCameraEnabled(true)
   return livekitRoom

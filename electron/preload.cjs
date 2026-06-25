@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('mochatDesktop', {
   platform: process.platform,
   launchConfig: getLaunchConfig(),
   selectFiles: () => ipcRenderer.invoke('dialog:select-files'),
+  http: {
+    request: (payload) => ipcRenderer.invoke('http:request', payload),
+  },
   chat: {
     connect: (payload) => ipcRenderer.invoke('chat:connect', payload),
     disconnect: () => ipcRenderer.invoke('chat:disconnect'),

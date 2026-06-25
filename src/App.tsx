@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { MutableRefObject } from 'react'
 import {
   Check, ChevronDown, ContactRound, FileText, Image, Info, LogOut, Menu,
   MessageSquare, Mic, Minus, MoreVertical, Paperclip, Phone, Plus, Search, Send,
@@ -6,10 +7,11 @@ import {
 } from 'lucide-react'
 import type { Room } from 'livekit-client'
 import './App.css'
-import { CallSignaling, api, getApiBaseUrl, getCallBaseUrl, getCallWsUrl, getMediaBaseUrl } from './api'
+import { CallSignaling, api, getApiBaseUrl, getCallBaseUrl, getCallWsUrl, getChatGatewayUrl, getMediaBaseUrl } from './api'
+import { decodeDeliveredAck, decodeErrorResponse, decodeRealtimeDelivery, decodeSendAck, extractTextFromDecodedPayload, toHistoryDelivery } from './chatProtocol'
 import { Avatar, EmptyState, Logo, Modal } from './components'
 import { conversations as seedConversations, friendRequests, initialMessages } from './data'
-import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendGroupJoinRequest, BackendTextMessage, CallSession, ChatMessage, Conversation, EntityId, FriendRequest, IncomingCall, Session } from './types'
+import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendGroupJoinRequest, BackendHistoryItem, CallSession, ChatGatewayContent, ChatGatewayDelivery, ChatGatewayError, ChatGatewaySendAck, ChatMessage, Conversation, EntityId, FriendRequest, IncomingCall, MediaUpload, Session } from './types'
 
 type Section = 'chats' | 'contacts' | 'groups' | 'requests' | 'settings'
 
@@ -70,15 +72,96 @@ function messageTime(serverTimeMs: number) {
   return new Date(serverTimeMs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-function textMessageToChatMessage(message: BackendTextMessage, session: Session): ChatMessage {
+function extractText(contents: ChatGatewayContent[] | undefined) {
+  for (const content of contents ?? []) {
+    if (content.plainText?.text) return content.plainText.text
+    if (content.encryptedText?.ciphertext) {
+      try {
+        return new TextDecoder().decode(Uint8Array.from(atob(content.encryptedText.ciphertext), (char) => char.charCodeAt(0)))
+      } catch {
+        return '[加密消息]'
+      }
+    }
+    if (content.media) return content.media.previewText || content.media.fileName || '[媒体消息]'
+  }
+  return ''
+}
+
+function mediaFields(contents: ChatGatewayContent[] | undefined) {
+  const media = contents?.find((item) => item.media)?.media
+  if (!media) return {}
+  return {
+    mediaUrl: media.mediaUrl,
+    fileName: media.fileName,
+  }
+}
+
+function deliveryToChatMessage(message: ChatGatewayDelivery, session: Session, fallbackFromMe = false): ChatMessage {
   return {
     id: message.msgId,
+    seq: message.seq,
     conversationId: message.conversationId,
-    fromMe: String(message.senderUserId) === String(session.userId),
-    text: message.text,
-    time: messageTime(message.serverTimeMs),
+    fromMe: fallbackFromMe || String(message.fromUid) === String(session.userId),
+    text: extractText(message.contents),
+    time: messageTime(Number(message.serverTimeMs)),
     status: 'sent',
+    ...mediaFields(message.contents),
   }
+}
+
+async function sendMediaMessage(
+  session: Session,
+  conversation: Conversation,
+  media: MediaUpload,
+  upsertConversationMessage: (message: ChatMessage) => void,
+  pendingMessagesRef: MutableRefObject<Map<string, { conversationId: EntityId; text: string; mediaUrl?: string; fileName?: string }>>,
+) {
+  const clientMsgId = Date.now() + Math.floor(Math.random() * 1000)
+  const optimisticMessage: ChatMessage = {
+    id: `pending-media-${clientMsgId}`,
+    clientMsgId,
+    conversationId: conversation.id,
+    fromMe: true,
+    text: media.fileName || '[媒体消息]',
+    time: messageTime(Date.now()),
+    status: 'sending',
+    mediaUrl: media.mediaUrl,
+    fileName: media.fileName,
+  }
+  pendingMessagesRef.current.set(String(clientMsgId), {
+    conversationId: conversation.id,
+    text: optimisticMessage.text,
+    mediaUrl: media.mediaUrl,
+    fileName: media.fileName,
+  })
+  upsertConversationMessage(optimisticMessage)
+  const payload = {
+    sessionId: session.sessionId,
+    clientMsgId,
+    conversationId: conversation.id,
+    media: {
+      messageType: inferMediaKind(media.mimeType),
+      mediaUrl: media.mediaUrl,
+      thumbnailUrl: media.thumbnailUrl,
+      fileSize: media.fileSize,
+      mimeType: media.mimeType,
+      fileName: media.fileName,
+      previewText: media.fileName,
+      waveformData: media.waveformData,
+    },
+  }
+  if (conversation.kind === 'group') {
+    await window.mochatDesktop?.chat.sendGroupMedia({ ...payload, groupId: conversation.targetId })
+    return
+  }
+  await window.mochatDesktop?.chat.sendPrivateMedia({ ...payload, toUid: conversation.targetId })
+}
+
+function inferMediaKind(mimeType: string) {
+  if (mimeType.startsWith('image/')) return 'image'
+  if (mimeType.startsWith('video/')) return 'video'
+  if (mimeType.startsWith('audio/')) return 'audio'
+  return 'file'
 }
 
 function friendRequestToViewModel(request: BackendFriendRequest): FriendRequest {
@@ -306,6 +389,7 @@ function Directory({
 }) {
   const [requests, setRequests] = useState<FriendRequest[]>(session.demo ? friendRequests : [])
   const [server, setServer] = useState(getApiBaseUrl())
+  const [chatGateway, setChatGateway] = useState(getChatGatewayUrl())
   const [callServer, setCallServer] = useState(getCallBaseUrl())
   const [callWs, setCallWs] = useState(getCallWsUrl())
   const [mediaServer, setMediaServer] = useState(getMediaBaseUrl())
@@ -455,7 +539,23 @@ function Directory({
     setError('')
   }
 
-  if (section === 'settings') return <section className="page-panel"><header><h1>设置</h1><p>管理客户端偏好与服务连接</p></header><div className="settings-card"><h3>账号</h3><div className="account-row"><Avatar initials={session.username[0]} color="#607be8" size="lg" /><div><strong>{session.username}</strong><span>用户 ID：{session.userId}</span><em>{session.demo ? '演示模式' : '已连接服务'}</em></div></div></div><div className="settings-card"><h3>连接</h3><label>API 服务地址<input value={server} onChange={(event) => setServer(event.target.value)} /></label><label>Call 服务地址<input value={callServer} onChange={(event) => setCallServer(event.target.value)} /></label><label>Call WebSocket 地址<input value={callWs} onChange={(event) => setCallWs(event.target.value)} /></label><label>Media 服务地址<input value={mediaServer} onChange={(event) => setMediaServer(event.target.value)} /></label><button className="primary-button" onClick={() => { localStorage.setItem('mochat.server', server); localStorage.setItem('mochat.callServer', callServer); localStorage.setItem('mochat.callWs', callWs); localStorage.setItem('mochat.mediaServer', mediaServer) }}>保存配置</button></div><div className="settings-card toggle-row"><div><h3>桌面通知</h3><p>收到新消息时显示系统通知</p></div><button className={`toggle ${notifications ? 'on' : ''}`} onClick={() => setNotifications(!notifications)}><i /></button></div></section>
+  if (section === 'settings') return <section className="page-panel">
+    <header><h1>设置</h1><p>管理客户端偏好与服务连接</p></header>
+    <div className="settings-card">
+      <h3>账号</h3>
+      <div className="account-row"><Avatar initials={session.username[0]} color="#607be8" size="lg" /><div><strong>{session.username}</strong><span>用户 ID：{session.userId}</span><em>{session.demo ? '演示模式' : '已连接服务'}</em></div></div>
+    </div>
+    <div className="settings-card">
+      <h3>连接</h3>
+      <label>API 服务地址<input value={server} onChange={(event) => setServer(event.target.value)} /></label>
+      <label>聊天网关地址<input value={chatGateway} onChange={(event) => setChatGateway(event.target.value)} placeholder="tls://localhost:9000" /></label>
+      <label>Call 服务地址<input value={callServer} onChange={(event) => setCallServer(event.target.value)} /></label>
+      <label>Call WebSocket 地址<input value={callWs} onChange={(event) => setCallWs(event.target.value)} /></label>
+      <label>Media 服务地址<input value={mediaServer} onChange={(event) => setMediaServer(event.target.value)} /></label>
+      <button className="primary-button" onClick={() => { localStorage.setItem('mochat.server', server); localStorage.setItem('mochat.chatGateway', chatGateway); localStorage.setItem('mochat.callServer', callServer); localStorage.setItem('mochat.callWs', callWs); localStorage.setItem('mochat.mediaServer', mediaServer) }}>保存配置</button>
+    </div>
+    <div className="settings-card toggle-row"><div><h3>桌面通知</h3><p>收到新消息时显示系统通知</p></div><button className={`toggle ${notifications ? 'on' : ''}`} onClick={() => setNotifications(!notifications)}><i /></button></div>
+  </section>
   if (section === 'requests') return <section className="page-panel"><header><h1>新的朋友</h1><p>{requests.filter((item) => item.status === 'pending').length} 个待处理申请</p></header>{error && <div className="page-error">{error}</div>}<div className="directory-list">{requests.length === 0 ? <EmptyState icon={<UserPlus />} title="暂无好友申请" text="收到新的好友申请后会显示在这里" /> : requests.map((request) => <div className="request-row" key={request.id}><Avatar initials={request.name[0]} color={colorFor(request.userId)} /><div><strong>{request.name}</strong><span>{request.message}</span><small>用户 ID：{request.userId}</small></div>{request.status === 'pending' ? <div className="request-actions"><button disabled={busy} onClick={() => handleRequest(request.id, 'reject')}>忽略</button><button className="primary-button" disabled={busy} onClick={() => handleRequest(request.id, 'accept')}>接受</button></div> : <em>{request.status === 'accepted' ? '已添加' : '已忽略'}</em>}</div>)}</div></section>
   const isGroup = section === 'groups'
   const source = conversations.filter((item) => isGroup ? item.kind === 'group' : item.kind === 'private')
@@ -697,6 +797,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [conversations, setConversations] = useState<Conversation[]>(session.demo ? seedConversations : [])
   const [selected, setSelected] = useState<EntityId | null>(session.demo ? seedConversations[0]?.id ?? null : null)
   const [messages, setMessages] = useState<ChatMessage[]>(session.demo ? initialMessages : [])
+  const [chatStatus, setChatStatus] = useState<'connecting' | 'connected' | 'reconnecting' | 'disconnected'>(session.demo ? 'disconnected' : 'connecting')
   const [directoryLoading, setDirectoryLoading] = useState(false)
   const [directoryError, setDirectoryError] = useState('')
   const [call, setCall] = useState<'voice' | 'video' | null>(null)
@@ -704,6 +805,8 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null)
   const [connectedIncomingCall, setConnectedIncomingCall] = useState<CallSession | null>(null)
   const [callSignalStatus, setCallSignalStatus] = useState<'connecting' | 'ready' | 'disconnected'>(session.demo ? 'disconnected' : 'connecting')
+  const latestSeqRef = useRef(new Map<string, number>())
+  const pendingMessagesRef = useRef(new Map<string, { conversationId: EntityId; text: string; mediaUrl?: string; fileName?: string }>())
   const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
   const refreshConversationPreview = useCallback((conversationId: EntityId, latest?: ChatMessage) => {
@@ -713,15 +816,42 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
       : conversation
     ))
   }, [])
+  const upsertConversationMessage = useCallback((message: ChatMessage) => {
+    setMessages((current) => {
+      const conversationMessages = current.filter((item) => String(item.conversationId) === String(message.conversationId))
+      const others = current.filter((item) => String(item.conversationId) !== String(message.conversationId))
+      const nextConversation = [...conversationMessages.filter((item) => String(item.id) !== String(message.id) && String(item.clientMsgId) !== String(message.clientMsgId)), message]
+        .sort((left, right) => Number(left.seq ?? left.id) - Number(right.seq ?? right.id))
+      return [...others, ...nextConversation]
+    })
+    refreshConversationPreview(message.conversationId, message)
+  }, [refreshConversationPreview])
   const loadMessages = useCallback(async () => {
     if (session.demo || !selectedConversation) return
-    const response = await api.textMessages(session.sessionId, selectedConversation.id)
-    const remoteMessages = (response.items ?? []).map((message) => textMessageToChatMessage(message, session))
+    const response = await api.history(session.sessionId, selectedConversation.id)
+    const remoteMessages = (response.items ?? []).map((item) => {
+      const historyItem: BackendHistoryItem = {
+        ...item,
+        conversationId: selectedConversation.id,
+      }
+      const delivery = toHistoryDelivery(historyItem, selectedConversation.kind)
+      const privateFromMe = selectedConversation.kind === 'private' && String(delivery.toUid) === String(selectedConversation.targetId)
+      const message = deliveryToChatMessage(delivery, session, privateFromMe)
+      return selectedConversation.kind === 'private'
+        ? { ...message, text: extractTextFromDecodedPayload({ contents: delivery.contents as unknown[] }) }
+        : message
+    })
+    latestSeqRef.current.set(String(selectedConversation.id), Number(remoteMessages.at(-1)?.seq ?? 0))
     setMessages((current) => {
       const otherMessages = current.filter((message) => String(message.conversationId) !== String(selectedConversation.id))
       return [...otherMessages, ...remoteMessages]
     })
     refreshConversationPreview(selectedConversation.id, remoteMessages.at(-1))
+    await window.mochatDesktop?.chat.sendReceiveAck({
+      sessionId: session.sessionId,
+      conversationId: selectedConversation.id,
+      latestReceivedSeq: remoteMessages.at(-1)?.seq ?? 0,
+    }).catch(() => undefined)
   }, [refreshConversationPreview, selectedConversation, session])
   const loadDirectory = useCallback(async (cancelled?: () => boolean) => {
     setDirectoryLoading(true)
@@ -757,6 +887,77 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
       cancelled = true
     }
   }, [loadDirectory, session.demo])
+  useEffect(() => {
+    if (session.demo || !window.mochatDesktop?.chat) return
+    setChatStatus('connecting')
+    window.mochatDesktop.chat.connect({ gatewayUrl: getChatGatewayUrl() }).catch((reason) => {
+      console.warn('MoChat chat gateway connect failed', reason)
+      setChatStatus('disconnected')
+    })
+    const unsubscribe = window.mochatDesktop.chat.onEvent((event) => {
+      const type = typeof event.type === 'string' ? event.type : ''
+      if (type === 'state') {
+        const state = String(event.state || 'disconnected')
+        if (state === 'connected' || state === 'reconnecting' || state === 'connecting' || state === 'disconnected') {
+          setChatStatus(state)
+        }
+        return
+      }
+      if (type === 'send-ack') {
+        const ack = decodeSendAck(event.payload) as ChatGatewaySendAck
+        const pending = pendingMessagesRef.current.get(String(ack.clientMsgId))
+        if (!pending) return
+        pendingMessagesRef.current.delete(String(ack.clientMsgId))
+        const message: ChatMessage = {
+          id: ack.msgId,
+          clientMsgId: ack.clientMsgId,
+          seq: ack.seq,
+          conversationId: pending.conversationId,
+          fromMe: true,
+          text: pending.text,
+          time: messageTime(Number(ack.serverTimeMs)),
+          status: 'sent',
+          mediaUrl: pending.mediaUrl,
+          fileName: pending.fileName,
+        }
+        latestSeqRef.current.set(String(pending.conversationId), Number(ack.seq))
+        upsertConversationMessage(message)
+        return
+      }
+      if (type === 'delivery') {
+        const delivery = decodeRealtimeDelivery(event.payload)
+        const chatMessage = deliveryToChatMessage(delivery, session)
+        latestSeqRef.current.set(String(chatMessage.conversationId), Number(delivery.seq))
+        upsertConversationMessage(chatMessage)
+        window.mochatDesktop?.chat.sendReceiveAck({
+          sessionId: session.sessionId,
+          conversationId: delivery.conversationId,
+          latestReceivedSeq: delivery.seq,
+        }).catch(() => undefined)
+        return
+      }
+      if (type === 'delivered-ack') {
+        decodeDeliveredAck(event.payload)
+        return
+      }
+      if (type === 'error-response') {
+        const error = decodeErrorResponse(event.payload) as ChatGatewayError
+        if (error.errorCode === 1000 || error.errorCode === 1001) {
+          window.dispatchEvent(new CustomEvent('mochat:session-invalid', { detail: error.message }))
+          return
+        }
+        setDirectoryError(error.message)
+        return
+      }
+      if (type === 'socket-error' && typeof event.message === 'string') {
+        setDirectoryError(event.message)
+      }
+    })
+    return () => {
+      unsubscribe()
+      window.mochatDesktop?.chat.disconnect().catch(() => undefined)
+    }
+  }, [session, upsertConversationMessage])
   useEffect(() => {
     if (session.demo) return
     let disposed = false
@@ -814,20 +1015,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   }, [session.demo, session.sessionId, signaling])
   useEffect(() => {
     if (session.demo || !selectedConversation) return
-    let cancelled = false
-    const refresh = async () => {
-      try {
-        if (!cancelled) await loadMessages()
-      } catch (reason) {
-        console.warn('MoChat message polling failed', reason)
-      }
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 1500)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
+    loadMessages().catch((reason) => console.warn('MoChat history load failed', reason))
   }, [loadMessages, selectedConversation, session.demo])
   async function send(text: string, attachments: File[]) {
     if (!selectedConversation || selected === null) return
@@ -839,26 +1027,49 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
       refreshConversationPreview(selected, localMessage)
       return
     }
+    const clientMsgId = Date.now()
+    if (text.trim()) {
+      const optimisticMessage = {
+        id: `pending-${clientMsgId}`,
+        clientMsgId,
+        conversationId: selectedConversation.id,
+        fromMe: true,
+        text,
+        time: now,
+        status: 'sending',
+      } satisfies ChatMessage
+      pendingMessagesRef.current.set(String(clientMsgId), { conversationId: selectedConversation.id, text })
+      upsertConversationMessage(optimisticMessage)
+      if (selectedConversation.kind === 'group') {
+        await window.mochatDesktop?.chat.sendGroupText({
+          sessionId: session.sessionId,
+          clientMsgId,
+          conversationId: selectedConversation.id,
+          groupId: selectedConversation.targetId,
+          text,
+        })
+      } else {
+        await window.mochatDesktop?.chat.sendPrivateText({
+          sessionId: session.sessionId,
+          clientMsgId,
+          conversationId: selectedConversation.id,
+          toUid: selectedConversation.targetId,
+          text,
+        })
+      }
+    }
     if (attachments.length > 0) {
       for (const file of attachments) {
         const media = await api.uploadMedia(file)
-        await api.sendMultimediaMessage(session.sessionId, selectedConversation, media)
+        await sendMediaMessage(session, selectedConversation, media, upsertConversationMessage, pendingMessagesRef)
       }
     }
-    const response = await api.sendTextMessage(session.sessionId, selectedConversation, text)
-    const sentMessage = textMessageToChatMessage(response.message, session)
-    setMessages((current) => [
-      ...current.filter((message) => String(message.id) !== String(sentMessage.id)),
-      sentMessage,
-    ])
-    refreshConversationPreview(selectedConversation.id, sentMessage)
-    await loadMessages()
   }
   return <main className="app-shell">
     <WindowControls />
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
     {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} onDetails={() => setDetailsConversation(selectedConversation)} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
-    <div className={`connection-pill ${session.demo || callSignalStatus !== 'ready' ? 'demo' : ''}`}>{session.demo || callSignalStatus !== 'ready' ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : callSignalStatus === 'ready' ? '服务已连接' : callSignalStatus === 'connecting' ? '通话信令连接中' : '通话信令已断开'}<ChevronDown /></div>
+    <div className={`connection-pill ${session.demo || chatStatus !== 'connected' ? 'demo' : ''}`}>{session.demo || chatStatus !== 'connected' ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : chatStatus === 'connected' ? (callSignalStatus === 'ready' ? '聊天与通话已连接' : '聊天已连接') : chatStatus === 'reconnecting' ? '聊天服务重连中' : chatStatus === 'connecting' ? '聊天服务连接中' : '聊天服务已断开'}<ChevronDown /></div>
     {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
     {detailsConversation && <ConversationDetailsModal session={session} conversation={detailsConversation} contacts={conversations.filter((item) => item.kind === 'private')} onRefreshDirectory={() => loadDirectory()} onClose={() => setDetailsConversation(null)} />}
     {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}

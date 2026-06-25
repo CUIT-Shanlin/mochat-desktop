@@ -4,6 +4,13 @@ const fs = require('node:fs')
 const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
+const {
+  ChatGatewayClient,
+  buildGroupMediaPayload,
+  buildGroupTextPayload,
+  buildPrivateMediaPayload,
+  buildPrivateTextPayload,
+} = require('./chat-gateway.cjs')
 
 const isDev = !app.isPackaged
 const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
@@ -12,6 +19,7 @@ const packagedRendererPath = path.join(__dirname, '..', 'build', 'renderer', 'in
 const packagedRendererPort = 39271
 let packagedRendererUrl = ''
 let rendererServer = null
+const chatClients = new Map()
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
@@ -168,7 +176,23 @@ function createWindow() {
     Menu.buildFromTemplate(template).popup({ window })
   })
 
+  window.on('closed', () => {
+    const client = chatClients.get(window.webContents.id)
+    client?.disconnect()
+    chatClients.delete(window.webContents.id)
+  })
+
   loadRenderer(window)
+}
+
+function chatClientFor(sender) {
+  const key = sender.id
+  if (chatClients.has(key)) return chatClients.get(key)
+  const client = new ChatGatewayClient((event) => {
+    if (!sender.isDestroyed()) sender.send('chat:event', event)
+  })
+  chatClients.set(key, client)
+  return client
 }
 
 function isRendererNavigation(url) {
@@ -262,6 +286,45 @@ ipcMain.handle('dialog:select-files', async () => {
     ],
   })
   return result.canceled ? [] : result.filePaths
+})
+
+ipcMain.handle('chat:connect', async (event, payload) => {
+  chatClientFor(event.sender).connect(payload)
+  return { ok: true }
+})
+
+ipcMain.handle('chat:disconnect', async (event) => {
+  chatClientFor(event.sender).disconnect()
+  return { ok: true }
+})
+
+ipcMain.handle('chat:send-private-text', async (event, payload) => {
+  chatClientFor(event.sender).sendPrivateMessage(buildPrivateTextPayload(payload))
+  return { ok: true }
+})
+
+ipcMain.handle('chat:send-group-text', async (event, payload) => {
+  chatClientFor(event.sender).sendGroupMessage(buildGroupTextPayload(payload))
+  return { ok: true }
+})
+
+ipcMain.handle('chat:send-private-media', async (event, payload) => {
+  chatClientFor(event.sender).sendPrivateMessage(buildPrivateMediaPayload(payload))
+  return { ok: true }
+})
+
+ipcMain.handle('chat:send-group-media', async (event, payload) => {
+  chatClientFor(event.sender).sendGroupMessage(buildGroupMediaPayload(payload))
+  return { ok: true }
+})
+
+ipcMain.handle('chat:send-receive-ack', async (event, payload) => {
+  chatClientFor(event.sender).sendReceiveAck({
+    sessionId: payload.sessionId,
+    conversationId: String(payload.conversationId),
+    latestReceivedSeq: String(payload.latestReceivedSeq),
+  })
+  return { ok: true }
 })
 
 ipcMain.on('window:minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize())

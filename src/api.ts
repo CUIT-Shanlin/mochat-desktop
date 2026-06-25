@@ -1,4 +1,4 @@
-import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendGroupJoinRequest, BackendTextMessage, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
+import type { BackendFriend, BackendFriendRequest, BackendGroup, BackendGroupJoinRequest, BackendHistoryItem, CallSession, CallSignalPayload, Conversation, EntityId, MediaMessageType, MediaUpload, Session } from './types'
 
 const demoEnabled = import.meta.env.VITE_DEMO_MODE === 'true'
 const testIdentityKeys: Record<string, string> = {
@@ -27,6 +27,32 @@ export function getCallWsUrl() {
 
 export function getMediaBaseUrl() {
   return configuredValue('mediaServer', 'mochat.mediaServer', import.meta.env.VITE_MEDIA_BASE_URL || 'http://localhost:8083').replace(/\/$/, '')
+}
+
+export function getChatGatewayUrl() {
+  const configured = localStorage.getItem('mochat.chatGateway') || import.meta.env.VITE_CHAT_GATEWAY_URL
+  if (configured) return normalizeChatGatewayUrl(configured)
+  const api = new URL(getApiBaseUrl())
+  const host = normalizeChatGatewayHost(api.hostname)
+  return `tls://${host}:9000`
+}
+
+function normalizeChatGatewayUrl(raw: string) {
+  const normalized = raw.replace(/\/$/, '')
+  try {
+    const url = new URL(normalized.includes('://') ? normalized : `tls://${normalized}`)
+    url.hostname = normalizeChatGatewayHost(url.hostname)
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return normalized
+  }
+}
+
+function normalizeChatGatewayHost(hostname: string) {
+  if (hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1' || hostname === '[::1]') {
+    return 'localhost'
+  }
+  return hostname
 }
 
 async function request<T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> {
@@ -93,16 +119,12 @@ export const api = {
   },
   friends: (sessionId: string) => apiRequest<{ friends?: BackendFriend[] }>(`/friends?sessionId=${encodeURIComponent(sessionId)}`),
   groups: (sessionId: string) => apiRequest<{ groups?: BackendGroup[] }>(`/groups?sessionId=${encodeURIComponent(sessionId)}`),
-  history: (sessionId: string, conversationId: EntityId) => apiRequest<{ items: unknown[] }>(`/history?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&limit=50`),
-  textMessages: (sessionId: string, conversationId: EntityId, afterSeq: EntityId = 0) =>
-    apiRequest<{ items?: BackendTextMessage[] }>(`/messages?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&afterSeq=${afterSeq}&limit=100`),
-  sendTextMessage(sessionId: string, conversation: Conversation, text: string) {
-    const path = conversation.kind === 'group' ? '/messages/send-text/group' : '/messages/send-text/private'
-    return apiRequest<{ message: BackendTextMessage }>(path, {
-      method: 'POST',
-      body: JSON.stringify({ sessionId, conversationId: conversation.id, text }),
-    })
-  },
+  history: (sessionId: string, conversationId: EntityId) =>
+    apiRequest<{ items?: Omit<BackendHistoryItem, 'conversationId'>[] }>(`/history?sessionId=${encodeURIComponent(sessionId)}&conversationId=${conversationId}&limit=50`),
+  conversationState: (sessionId: string, conversationId: EntityId) =>
+    apiRequest<{ conversationId: EntityId; latestSeq: EntityId; latestMessageTime: number }>(`/conversations/${conversationId}/state?sessionId=${encodeURIComponent(sessionId)}`),
+  privatePeerReceivedSeq: (sessionId: string, conversationId: EntityId) =>
+    apiRequest<{ conversationId: EntityId; latestReceivedSeq: EntityId }>(`/conversations/${conversationId}/private-peer-received-seq?sessionId=${encodeURIComponent(sessionId)}`),
   createGroup: (sessionId: string, name: string) => apiRequest<{ group: BackendGroup }>('/groups', { method: 'POST', body: JSON.stringify({ sessionId, name }) }),
   inviteGroupMember: (sessionId: string, groupId: EntityId, memberUserId: EntityId) =>
     apiRequest<{ groupId: EntityId; userId: EntityId; status: string }>(`/groups/${groupId}/members`, { method: 'POST', body: JSON.stringify({ sessionId, memberUserId }) }),

@@ -33,6 +33,10 @@ declare global {
         sendReceiveAck: (payload: { sessionId: string; conversationId: string | number; latestReceivedSeq: string | number }) => Promise<{ ok: boolean }>
         onEvent: (listener: (payload: Record<string, unknown>) => void) => () => void
       }
+      identityKey: {
+        get: (username: string) => Promise<string | null>
+        set: (username: string, publicKey: string) => Promise<boolean>
+      }
       window: {
         minimize: () => void
         maximize: () => void

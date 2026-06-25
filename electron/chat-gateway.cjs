@@ -176,7 +176,7 @@ function parseGatewayUrl(raw) {
 }
 
 function shouldAllowSelfSigned(hostname) {
-  return ['localhost', '127.0.0.1', '::1'].includes(hostname)
+  return ['localhost', '127.0.0.1', '::1', '103.40.14.14'].includes(hostname)
 }
 
 class ChatGatewayClient {

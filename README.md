@@ -32,10 +32,11 @@ npm run dev:web
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `VITE_API_BASE_URL` | `http://localhost:8080` | api-service REST 地址 |
-| `VITE_CALL_BASE_URL` | `http://localhost:8090` | call-service REST 地址 |
-| `VITE_CALL_WS_URL` | `ws://localhost:8090` | call-service WebSocket 地址 |
-| `VITE_MEDIA_BASE_URL` | `http://localhost:8083` | multimedia-service REST 地址 |
+| `VITE_API_BASE_URL` | `http://103.40.14.14:57675` | api-service REST 地址 |
+| `VITE_CALL_BASE_URL` | `http://103.40.14.14:24478` | call-service REST 地址 |
+| `VITE_CALL_WS_URL` | `ws://103.40.14.14:24478` | call-service WebSocket 地址 |
+| `VITE_MEDIA_BASE_URL` | `http://114.66.28.185:20216` | multimedia-service REST 地址 |
+| `VITE_CHAT_GATEWAY_URL` | `tls://103.40.14.14:20823` | access-gateway IM TCP/TLS 地址（聊天长连接） |
 | `VITE_DEMO_MODE` | `true` | 后端不可用时启用演示模式 |
 
 应用内的“设置 > 连接”可覆盖 API、Call 和 Media 服务地址。

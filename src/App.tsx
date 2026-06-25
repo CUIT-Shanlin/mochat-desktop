@@ -17,6 +17,35 @@ type Section = 'chats' | 'contacts' | 'groups' | 'requests' | 'settings'
 
 const avatarPalette = ['#607be8', '#7b69d9', '#3a9d89', '#d48758', '#cf6f9f', '#4f9cd8']
 
+// 把自己发过的消息 msgId 持久化到 localStorage。重启客户端后仍然能识别历史消息里
+// "这条是我发的"。每个用户单独一个 key，避免登出登入不同账号时混淆。
+function sentMsgIdsStorageKey(sessionId: string): string {
+  return `mochat.sentMsgIds.${sessionId}`
+}
+
+function loadSentMsgIds(sessionId: string): Set<string> {
+  if (typeof localStorage === 'undefined') return new Set()
+  try {
+    const raw = localStorage.getItem(sentMsgIdsStorageKey(sessionId))
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((item) => typeof item === 'string' || typeof item === 'number').map(String))
+  } catch {
+    return new Set()
+  }
+}
+
+function saveSentMsgIds(sessionId: string, ids: Set<string>): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    const arr = Array.from(ids).slice(-2000) // 最多保留最近 2000 条，避免 localStorage 过大
+    localStorage.setItem(sentMsgIdsStorageKey(sessionId), JSON.stringify(arr))
+  } catch {
+    // localStorage 满了或被禁用就静默忽略
+  }
+}
+
 function initialsFor(name: string) {
   return (name.trim().slice(0, 1) || '?').toUpperCase()
 }
@@ -223,6 +252,7 @@ function Login({ onLogin }: { onLogin: (session: Session) => void }) {
 }
 
 function Sidebar({ section, setSection, session, onLogout }: { section: Section; setSection: (section: Section) => void; session: Session; onLogout: () => void }) {
+  const [showProfile, setShowProfile] = useState(false)
   const nav: { id: Section; label: string; icon: typeof MessageSquare; badge?: number }[] = [
     { id: 'chats', label: '消息', icon: MessageSquare, badge: session.demo ? 2 : undefined },
     { id: 'contacts', label: '联系人', icon: ContactRound },
@@ -231,12 +261,24 @@ function Sidebar({ section, setSection, session, onLogout }: { section: Section;
   ]
   return <aside className="rail">
     <div className="drag-region" />
-    <button className="profile-button" title={session.username}><Avatar initials={session.username.slice(0, 1).toUpperCase()} color="#607be8" size="sm" /></button>
+    <button className="profile-button" title={session.username} onClick={() => setShowProfile(true)}><Avatar initials={session.username.slice(0, 1).toUpperCase()} color="#607be8" size="sm" /></button>
     <nav>{nav.map(({ id, label, icon: Icon, badge }) => <button key={id} className={section === id ? 'active' : ''} onClick={() => setSection(id)} title={label}><Icon />{badge ? <span>{badge}</span> : null}</button>)}</nav>
     <div className="rail-bottom">
       <button className={section === 'settings' ? 'active' : ''} onClick={() => setSection('settings')} title="设置"><Settings /></button>
       <button onClick={onLogout} title="退出登录"><LogOut /></button>
     </div>
+    {showProfile && <Modal title="我的账号" onClose={() => setShowProfile(false)} footer={<button className="ghost-button" onClick={() => setShowProfile(false)}>关闭</button>}>
+      <div className="modal-form">
+        <div className="account-row">
+          <Avatar initials={session.username.slice(0, 1).toUpperCase()} color="#607be8" size="lg" />
+          <div>
+            <strong>{session.username}</strong>
+            <span>用户 ID：{session.userId}</span>
+            <em>{session.demo ? '演示模式' : '已连接服务'}</em>
+          </div>
+        </div>
+      </div>
+    </Modal>}
   </aside>
 }
 
@@ -862,6 +904,10 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [callSignalStatus, setCallSignalStatus] = useState<'connecting' | 'ready' | 'disconnected'>(session.demo ? 'disconnected' : 'connecting')
   const latestSeqRef = useRef(new Map<string, number>())
   const pendingMessagesRef = useRef(new Map<string, { conversationId: EntityId; text: string; mediaUrl?: string; fileName?: string }>())
+  // 自己发过的消息 msgId 集合。历史接口不返回 senderUid（后端这块还没接通），
+  // 但自己发过的消息会有 SEND_ACK，msgId 会被服务端分配并回传，把这个 msgId 记下来，
+  // 渲染历史时查这个集合就能正确判断 fromMe。持久化到 localStorage，客户端重启后仍能识别。
+  const sentMsgIdsRef = useRef<Set<string>>(loadSentMsgIds(session.sessionId))
   const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
   const refreshConversationPreview = useCallback((conversationId: EntityId, latest?: ChatMessage) => {
@@ -883,32 +929,66 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   }, [refreshConversationPreview])
   const loadMessages = useCallback(async () => {
     if (session.demo || !selectedConversation) return
-    const response = await api.history(session.sessionId, selectedConversation.id)
-    const remoteMessages = (response.items ?? []).map((item) => {
-      const historyItem: BackendHistoryItem = {
-        ...item,
-        conversationId: selectedConversation.id,
+    // 整个加载流程用 try/catch 兜底：任何一条消息解码失败、网络异常都不会让
+    // UI 一直停在"没消息"的状态。已成功解码的消息会先塞进 state，再继续处理剩下的。
+    try {
+      const response = await api.history(session.sessionId, selectedConversation.id)
+      const remoteMessages: ChatMessage[] = []
+      for (const item of response.items ?? []) {
+        try {
+          const historyItem: BackendHistoryItem = {
+            ...item,
+            conversationId: selectedConversation.id,
+          }
+          const delivery = toHistoryDelivery(historyItem, selectedConversation.kind)
+          // fromMe 判断（不依赖后端 senderUid 字段，纯粹用本地信息推）：
+          // 1) 自己在本次会话发过的消息，msgId 会被记在 sentMsgIdsRef 集合里（来自 SEND_ACK）；
+          // 2) 私聊消息可以通过 payload 解码出来的 toUid 反推——"接收者 == 我"意味着是对方发的；
+          // 3) 群聊没有 toUid 字段，退回 fromUid 判定（实时 delivery 会写入 fromUid）。
+          const knownSent = item.msgId !== undefined && sentMsgIdsRef.current.has(String(item.msgId))
+          const toUid = (delivery as { toUid?: EntityId }).toUid
+          const privateFromMe = selectedConversation.kind === 'private'
+            && !knownSent
+            && typeof toUid !== 'undefined'
+            && String(toUid) !== '0'
+            && String(toUid) !== String(session.userId)
+          const message = deliveryToChatMessage(delivery, session, knownSent || privateFromMe)
+          const text = selectedConversation.kind === 'private'
+            ? extractTextFromDecodedPayload({ contents: delivery.contents as unknown[] })
+            : message.text
+          remoteMessages.push({ ...message, text })
+        } catch (itemError) {
+          // 单条消息解析失败：用原始数据塞一条占位消息进 state，不让整个列表消失
+          console.warn('MoChat history item decode failed', itemError, item)
+          remoteMessages.push({
+            id: item.msgId,
+            seq: item.seq,
+            conversationId: selectedConversation.id,
+            fromMe: false,
+            text: '[消息内容无法解析]',
+            time: messageTime(Number(item.serverTimeMs) || Date.now()),
+            status: 'sent',
+          })
+        }
       }
-      const delivery = toHistoryDelivery(historyItem, selectedConversation.kind)
-      // 用后端返回的 senderUid 判断 fromMe，不再依赖 payload_base64 解码出来的 toUid。
-      // 原因：早期入库的 payload 是明文 UTF-8 字符串，protobuf 解码后 toUid 会变成 0；
-      // 而新数据在 senderUid 字段里始终是真实的发送者 userId，更可靠。
-      const privateFromMe = selectedConversation.kind === 'private' && String(item.senderUid) === String(session.userId)
-      const message = deliveryToChatMessage(delivery, session, privateFromMe)
-      return selectedConversation.kind === 'private'
-        ? { ...message, text: extractTextFromDecodedPayload({ contents: delivery.contents as unknown[] }) }
-        : message
-    })
-    latestSeqRef.current.set(String(selectedConversation.id), Number(remoteMessages.at(-1)?.seq ?? 0))
-    setMessages((current) => {
-      const otherMessages = current.filter((message) => String(message.conversationId) !== String(selectedConversation.id))
-      return [...otherMessages, ...remoteMessages]
-    })
-    refreshConversationPreview(selectedConversation.id, remoteMessages.at(-1))
+      if (remoteMessages.length > 0) {
+        latestSeqRef.current.set(String(selectedConversation.id), Number(remoteMessages.at(-1)?.seq ?? 0))
+        setMessages((current) => {
+          const otherMessages = current.filter((message) => String(message.conversationId) !== String(selectedConversation.id))
+          return [...otherMessages, ...remoteMessages]
+        })
+        refreshConversationPreview(selectedConversation.id, remoteMessages.at(-1))
+      }
+    } catch (error) {
+      console.warn('MoChat history load failed', error)
+      // 不 throw，让 UI 至少保留之前已展示的消息
+    }
+    // 触发一次 RECEIVE_ACK（不依赖 await 成功）— 即使历史接口报错，
+    // 也得保证 access-gateway.SessionBindingHandler 有机会 bind 上。
     await window.mochatDesktop?.chat.sendReceiveAck({
       sessionId: session.sessionId,
       conversationId: selectedConversation.id,
-      latestReceivedSeq: remoteMessages.at(-1)?.seq ?? 0,
+      latestReceivedSeq: latestSeqRef.current.get(String(selectedConversation.id)) ?? 0,
     }).catch(() => undefined)
   }, [refreshConversationPreview, selectedConversation, session])
   const loadDirectory = useCallback(async (cancelled?: () => boolean) => {
@@ -979,6 +1059,9 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
           fileName: pending.fileName,
         }
         latestSeqRef.current.set(String(pending.conversationId), Number(ack.seq))
+        // 把 msgId 记到 sentMsgIds 里，渲染历史时用这个判断 fromMe
+        sentMsgIdsRef.current.add(String(ack.msgId))
+        saveSentMsgIds(session.sessionId, sentMsgIdsRef.current)
         upsertConversationMessage(message)
         return
       }
@@ -1020,13 +1103,28 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   // access-gateway 的 SessionBindingHandler 只在收到 PRIVATE_MESSAGE / GROUP_MESSAGE / CLIENT_RECEIVE_ACK
   // 这类带 sessionId 的消息时才会去权威服务认人，并把 online:user:{uid} 写进 Redis。
   // 如果不发，access-gateway 永远找不到这条连接来推实时消息。
+  // 这里除了"变化时立即发"，还额外加一个 5s 间隔的定时器反复发，确保
+  // 即使对端 access-gateway 重启导致 binding 丢失，客户端也能很快重新 bind 上。
   useEffect(() => {
-    if (session.demo || chatStatus !== 'connected' || !selectedConversation) return
-    window.mochatDesktop?.chat.sendReceiveAck({
-      sessionId: session.sessionId,
-      conversationId: selectedConversation.id,
-      latestReceivedSeq: latestSeqRef.current.get(String(selectedConversation.id)) ?? 0,
-    }).catch(() => undefined)
+    if (session.demo || chatStatus !== 'connected') return
+    let stopped = false
+    function send() {
+      if (stopped) return
+      const target = selectedConversation ?? null
+      // 没选会话时也要发——SessionBindingHandler 在 access-gateway 上是按 userId 维度绑定的，
+      // 跟具体会话无关。先发一个 convId=0 的 RECEIVE_ACK 触发 bind，之后会话切换时再发具体的。
+      window.mochatDesktop?.chat.sendReceiveAck({
+        sessionId: session.sessionId,
+        conversationId: target?.id ?? '0',
+        latestReceivedSeq: target ? latestSeqRef.current.get(String(target.id)) ?? 0 : 0,
+      }).catch(() => undefined)
+    }
+    send()
+    const interval = window.setInterval(send, 5000)
+    return () => {
+      stopped = true
+      window.clearInterval(interval)
+    }
   }, [chatStatus, selectedConversation, session])
   useEffect(() => {
     if (session.demo) return

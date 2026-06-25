@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, safeStorage } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -14,6 +14,41 @@ const {
 
 const isDev = !app.isPackaged
 const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
+
+// ---------- identity-key store (shared across all windows) ----------
+// 用 safeStorage 加密后落盘，所有窗口进程共用同一份密钥文件。
+const IDENTITY_KEYS_FILE = path.join(app.getPath('userData'), 'identity-keys.enc')
+let identityKeysCache = null
+
+function loadIdentityKeys() {
+  if (identityKeysCache !== null) return identityKeysCache
+  try {
+    const encrypted = fs.readFileSync(IDENTITY_KEYS_FILE)
+    const decrypted = safeStorage.decryptString(encrypted)
+    identityKeysCache = JSON.parse(decrypted)
+  } catch {
+    identityKeysCache = {}
+  }
+  return identityKeysCache
+}
+
+function saveIdentityKeys(keys) {
+  identityKeysCache = keys
+  fs.mkdirSync(path.dirname(IDENTITY_KEYS_FILE), { recursive: true })
+  const encrypted = safeStorage.encryptString(JSON.stringify(keys))
+  fs.writeFileSync(IDENTITY_KEYS_FILE, encrypted)
+}
+
+function readIdentityKey(username) {
+  return loadIdentityKeys()[username] || null
+}
+
+function writeIdentityKey(username, publicKey) {
+  const keys = loadIdentityKeys()
+  keys[username] = publicKey
+  saveIdentityKeys(keys)
+}
+// --------------------------------------------------------------------------
 const devRendererUrl = 'http://localhost:5173'
 const packagedRendererPath = path.join(__dirname, '..', 'build', 'renderer', 'index.html')
 const packagedRendererPort = 39271
@@ -352,6 +387,15 @@ ipcMain.on('window:maximize', (event) => {
   window.isMaximized() ? window.unmaximize() : window.maximize()
 })
 ipcMain.on('window:close', (event) => BrowserWindow.fromWebContents(event.sender)?.close())
+
+ipcMain.handle('identity-key:get', async (_event, username) => {
+  return readIdentityKey(username)
+})
+
+ipcMain.handle('identity-key:set', async (_event, username, publicKey) => {
+  writeIdentityKey(username, publicKey)
+  return true
+})
 
 app.whenReady().then(async () => {
   await startPackagedRendererServer()

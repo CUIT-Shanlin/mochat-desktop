@@ -155,19 +155,47 @@ export function decodeHistoryItem(item: BackendHistoryItem, kind: 'private' | 'g
   // 非 protobuf 字节有两种表现：抛异常，或者"部分解码"返回空 contents。两种情况
   // 都通过 contents 是否为空 + 内容类型是否齐全来判断是否走明文兜底。
   const contents = Array.isArray(decoded?.contents) ? (decoded!.contents as unknown[]) : []
-  if (contents.length > 0) return decoded!
-  const text = decodePlainText(bytes)
-  if (!text) return decoded ?? {}
-  return { contents: [{ plainText: { text } }] }
+  if (contents.length > 0 && hasRenderableContents(contents)) return decoded!
+  // 兜底：从原始字节里尝试找出可读文本，**绝不**直接把 protobuf header 字节当 utf-8 输出。
+  const fallback = extractReadableText(bytes)
+  if (fallback) return { contents: [{ plainText: { text: fallback } }] }
+  // 完全不可读：返回占位文本，避免 UI 出现 `\u0010�����3` 这种 protobuf header 字符。
+  return { contents: [{ plainText: { text: '[无法解析的消息]' } }] }
 }
 
-function decodePlainText(bytes: Uint8Array): string {
-  if (bytes.length === 0) return ''
-  try {
-    return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
-  } catch {
-    return ''
+// 仅在 contents 真的有可渲染内容（plainText/encryptedText/media 任一字段非空）时才视为成功解析。
+// 部分 protobufjs 解码会返回 `contents: [{}]` 这种空对象，下面的判断会把它们当 fallback 处理。
+function hasRenderableContents(contents: unknown[]): boolean {
+  for (const content of contents) {
+    if (!content || typeof content !== 'object') continue
+    const record = content as Record<string, unknown>
+    const plain = record.plainText as { text?: string } | undefined
+    if (plain?.text) return true
+    const encrypted = record.encryptedText as { nonce?: string; ciphertext?: string } | undefined
+    if (encrypted?.ciphertext) return true
+    const media = record.media as { mediaUrl?: string; fileName?: string; previewText?: string } | undefined
+    if (media && (media.mediaUrl || media.fileName || media.previewText)) return true
   }
+  return false
+}
+
+// 从 raw bytes 中尽量提取可读文本。优先尝试严格 utf-8（fatal），失败就退到 printable ASCII 子串。
+// 这样可以避免显示 `\u0010�����3 ����ڙ��� �������� R$ " 123456789012 tcp verify hello 2` 这种
+// "protobuf header 字节 + 末尾明文" 的混合乱码——header 部分的二进制会被剥掉，只保留明文片段。
+function extractReadableText(bytes: Uint8Array): string {
+  if (bytes.length === 0) return ''
+  // 1. 严格 utf-8：合法明文会直接命中。
+  try {
+    const strict = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    if (strict.trim()) return strict
+  } catch {
+    // 非法 utf-8：继续往下走
+  }
+  // 2. 非严格 utf-8：保留明文段，但丢弃 U+FFFD 替换符。
+  const lenient = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+  const cleaned = lenient.replace(/\uFFFD/g, '').trim()
+  if (cleaned) return cleaned
+  return ''
 }
 
 export function decodeRealtimeDelivery(payload: unknown) {

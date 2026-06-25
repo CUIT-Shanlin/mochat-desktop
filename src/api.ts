@@ -13,20 +13,20 @@ function configuredValue(key: 'server' | 'callServer' | 'callWs' | 'mediaServer'
 }
 
 export function getApiBaseUrl() {
-  return configuredValue('server', 'mochat.server', import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080').replace(/\/$/, '')
+  return configuredValue('server', 'mochat.server', import.meta.env.VITE_API_BASE_URL || 'http://103.40.14.14:57675').replace(/\/$/, '')
 }
 
 export function getCallBaseUrl() {
-  return normalizeHttpBaseUrl(configuredValue('callServer', 'mochat.callServer', import.meta.env.VITE_CALL_BASE_URL || 'http://localhost:8090'))
+  return normalizeHttpBaseUrl(configuredValue('callServer', 'mochat.callServer', import.meta.env.VITE_CALL_BASE_URL || 'http://103.40.14.14:24478'))
 }
 
 export function getCallWsUrl() {
-  const configured = configuredValue('callWs', 'mochat.callWs', import.meta.env.VITE_CALL_WS_URL)
+  const configured = configuredValue('callWs', 'mochat.callWs', import.meta.env.VITE_CALL_WS_URL || 'ws://103.40.14.14:24478')
   return normalizeWsBaseUrl(configured || getCallBaseUrl().replace(/^http/, 'ws'))
 }
 
 export function getMediaBaseUrl() {
-  return configuredValue('mediaServer', 'mochat.mediaServer', import.meta.env.VITE_MEDIA_BASE_URL || 'http://localhost:8083').replace(/\/$/, '')
+  return configuredValue('mediaServer', 'mochat.mediaServer', import.meta.env.VITE_MEDIA_BASE_URL || 'http://114.66.28.185:20216').replace(/\/$/, '')
 }
 
 export function getChatGatewayUrl() {
@@ -34,7 +34,8 @@ export function getChatGatewayUrl() {
   if (configured) return normalizeChatGatewayUrl(configured)
   const api = new URL(getApiBaseUrl())
   const host = normalizeChatGatewayHost(api.hostname)
-  return `tls://${host}:9000`
+  const port = api.port || '20823'
+  return `tls://${host}:${port}`
 }
 
 function normalizeChatGatewayUrl(raw: string) {
@@ -140,23 +141,38 @@ function generatePublicKey(): string {
   return btoa(String.fromCharCode(...bytes))
 }
 
-function identityKeyFor(username: string) {
-  const storageKey = `mochat.identityKey.${username}`
+async function identityKeyFor(username: string): Promise<string> {
   if (testIdentityKeys[username]) {
-    localStorage.setItem(storageKey, testIdentityKeys[username])
-    return testIdentityKeys[username]
+    const key = testIdentityKeys[username]
+    await storeIdentityKey(username, key)
+    return key
   }
-  const existing = localStorage.getItem(storageKey)
+  const existing = await readIdentityKey(username)
   if (existing) return existing
   const publicKey = generatePublicKey()
-  localStorage.setItem(storageKey, publicKey)
+  await storeIdentityKey(username, publicKey)
   return publicKey
+}
+
+async function readIdentityKey(username: string): Promise<string | null> {
+  if (window.mochatDesktop?.identityKey) {
+    return window.mochatDesktop.identityKey.get(username)
+  }
+  return localStorage.getItem(`mochat.identityKey.${username}`)
+}
+
+async function storeIdentityKey(username: string, publicKey: string): Promise<void> {
+  if (window.mochatDesktop?.identityKey) {
+    await window.mochatDesktop.identityKey.set(username, publicKey)
+    return
+  }
+  localStorage.setItem(`mochat.identityKey.${username}`, publicKey)
 }
 
 export const api = {
   async login(username: string): Promise<Session> {
     try {
-      const publicKey = identityKeyFor(username)
+      const publicKey = await identityKeyFor(username)
       return await apiRequest<Session>('/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, publicKey }),

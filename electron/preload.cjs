@@ -31,6 +31,10 @@ contextBridge.exposeInMainWorld('mochatDesktop', {
       return () => ipcRenderer.removeListener('chat:event', wrapped)
     },
   },
+  identityKey: {
+    get: (username) => ipcRenderer.invoke('identity-key:get', username),
+    set: (username, publicKey) => ipcRenderer.invoke('identity-key:set', username, publicKey),
+  },
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),
     maximize: () => ipcRenderer.send('window:maximize'),

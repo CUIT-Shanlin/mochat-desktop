@@ -409,13 +409,19 @@ function Directory({
   </Modal>}</section>
 }
 
-async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUrl'>, kind: 'voice' | 'video') {
+type CallVideoTargets = {
+  local?: HTMLElement | null
+  remote?: HTMLElement | null
+}
+
+async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUrl'>, kind: 'voice' | 'video', videoTargets: CallVideoTargets = {}) {
   if (!result.token || !result.livekitUrl) throw new Error('通话令牌未返回')
   const { Room, RoomEvent, Track } = await import('livekit-client')
   const livekitRoom = new Room()
   const remoteAudioElements = new Set<HTMLMediaElement>()
-  type AttachableAudioTrack = { kind: string; attach: () => HTMLMediaElement; detach: () => HTMLMediaElement[] }
-  const attachRemoteAudio = (track: AttachableAudioTrack) => {
+  const videoElements = new Set<HTMLMediaElement>()
+  type AttachableTrack = { kind: string; attach: () => HTMLMediaElement; detach: () => HTMLMediaElement[] }
+  const attachRemoteAudio = (track: AttachableTrack) => {
     if (track.kind !== Track.Kind.Audio) return
     const element = track.attach() as HTMLAudioElement
     element.autoplay = true
@@ -424,28 +430,58 @@ async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUr
     remoteAudioElements.add(element)
     element.play().catch((reason: unknown) => console.warn('MoChat remote audio playback blocked', reason))
   }
-  const detachRemoteAudio = (track: AttachableAudioTrack) => {
+  const attachVideo = (track: AttachableTrack, container?: HTMLElement | null) => {
+    if (track.kind !== Track.Kind.Video || !container) return
+    container.replaceChildren()
+    const element = track.attach() as HTMLVideoElement
+    element.autoplay = true
+    element.muted = container === videoTargets.local
+    element.playsInline = true
+    element.style.width = '100%'
+    element.style.height = '100%'
+    element.style.objectFit = 'cover'
+    container.appendChild(element)
+    videoElements.add(element)
+    element.play().catch((reason: unknown) => console.warn('MoChat video playback blocked', reason))
+  }
+  const detachTrack = (track: AttachableTrack) => {
     for (const element of track.detach()) {
       remoteAudioElements.delete(element)
+      videoElements.delete(element)
       element.remove()
     }
   }
-  const removeAllRemoteAudio = () => {
+  const removeAllMedia = () => {
     for (const element of remoteAudioElements) element.remove()
     remoteAudioElements.clear()
+    for (const element of videoElements) element.remove()
+    videoElements.clear()
+    videoTargets.local?.replaceChildren()
+    videoTargets.remote?.replaceChildren()
   }
-  livekitRoom.on(RoomEvent.TrackSubscribed, (track) => attachRemoteAudio(track))
-  livekitRoom.on(RoomEvent.TrackUnsubscribed, (track) => detachRemoteAudio(track))
-  livekitRoom.on(RoomEvent.Disconnected, removeAllRemoteAudio)
+  livekitRoom.on(RoomEvent.TrackSubscribed, (track) => {
+    attachRemoteAudio(track)
+    attachVideo(track, videoTargets.remote)
+  })
+  livekitRoom.on(RoomEvent.TrackUnsubscribed, (track) => detachTrack(track))
+  livekitRoom.on(RoomEvent.Disconnected, removeAllMedia)
   await livekitRoom.connect(result.livekitUrl, result.token)
   await livekitRoom.startAudio().catch((reason: unknown) => console.warn('MoChat audio playback start failed', reason))
   for (const participant of livekitRoom.remoteParticipants.values()) {
     for (const publication of participant.audioTrackPublications.values()) {
       if (publication.track) attachRemoteAudio(publication.track)
     }
+    for (const publication of participant.videoTrackPublications.values()) {
+      if (publication.track) attachVideo(publication.track, videoTargets.remote)
+    }
   }
   await livekitRoom.localParticipant.setMicrophoneEnabled(true)
-  if (kind === 'video') await livekitRoom.localParticipant.setCameraEnabled(true)
+  if (kind === 'video') {
+    await livekitRoom.localParticipant.setCameraEnabled(true)
+    for (const publication of livekitRoom.localParticipant.videoTrackPublications.values()) {
+      if (publication.track) attachVideo(publication.track, videoTargets.local)
+    }
+  }
   return livekitRoom
 }
 
@@ -453,6 +489,8 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
   const [status, setStatus] = useState('正在请求通话服务…')
   const [callSession, setCallSession] = useState<CallSession | null>(null)
   const [room, setRoom] = useState<Room | null>(null)
+  const localVideoRef = useRef<HTMLDivElement | null>(null)
+  const remoteVideoRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -461,7 +499,7 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
       try {
         const result = conversation.kind === 'group'
           ? await api.startGroupCall(session.sessionId, conversation.targetId)
-          : await api.startPrivateCall(session.sessionId, conversation.targetId)
+          : await api.startPrivateCall(session.sessionId, conversation.targetId, kind)
         if (cancelled) return
         setCallSession(result)
         if (!result.token || !result.livekitUrl) {
@@ -469,7 +507,7 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
           return
         }
         setStatus('正在连接 LiveKit 房间…')
-        const livekitRoom = await connectLiveKitRoom(result, kind)
+        const livekitRoom = await connectLiveKitRoom(result, kind, { local: localVideoRef.current, remote: remoteVideoRef.current })
         activeRoom = livekitRoom
         if (cancelled) {
           livekitRoom.disconnect()
@@ -496,7 +534,7 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
     onClose()
   }
 
-  return <div className="call-backdrop"><section className="call-card"><div className="call-pulse"><Avatar initials={conversation.initials} color={conversation.color} size="lg" /></div><h2>{conversation.name}</h2><p>{kind === 'video' ? '正在发起视频通话…' : '正在发起语音通话…'}</p><div className="call-status"><Wifi />{status}</div>{callSession?.roomName && <div className="call-room">房间：{callSession.roomName}</div>}<div className="call-buttons"><button title="扬声器"><Volume2 /></button><button title="麦克风"><Mic /></button><button className="hangup" onClick={hangup} title="挂断"><Phone /></button></div></section></div>
+  return <div className="call-backdrop"><section className={`call-card ${kind === 'video' ? 'video-call-card' : ''}`}>{kind === 'video' ? <div className="call-video-stage"><div className="call-video-remote" ref={remoteVideoRef}><span>等待对方视频…</span></div><div className="call-video-local" ref={localVideoRef}><span>本地视频</span></div></div> : <div className="call-pulse"><Avatar initials={conversation.initials} color={conversation.color} size="lg" /></div>}<h2>{conversation.name}</h2><p>{kind === 'video' ? '正在发起视频通话…' : '正在发起语音通话…'}</p><div className="call-status"><Wifi />{status}</div>{callSession?.roomName && <div className="call-room">房间：{callSession.roomName}</div>}<div className="call-buttons"><button title="扬声器"><Volume2 /></button><button title="麦克风"><Mic /></button><button className="hangup" onClick={hangup} title="挂断"><Phone /></button></div></section></div>
 }
 
 function IncomingCallModal({
@@ -515,6 +553,9 @@ function IncomingCallModal({
   const [status, setStatus] = useState('收到通话邀请')
   const [room, setRoom] = useState<Room | null>(null)
   const [accepting, setAccepting] = useState(false)
+  const callKind = incoming.callKind || 'voice'
+  const localVideoRef = useRef<HTMLDivElement | null>(null)
+  const remoteVideoRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!connectedSession || connectedSession.roomName !== incoming.roomName || room) return
@@ -523,13 +564,13 @@ function IncomingCallModal({
     async function connectAcceptedPrivateCall() {
       try {
         setStatus('正在连接 LiveKit 房间…')
-        const livekitRoom = await connectLiveKitRoom(sessionToConnect, 'voice')
+        const livekitRoom = await connectLiveKitRoom(sessionToConnect, callKind, { local: localVideoRef.current, remote: remoteVideoRef.current })
         if (cancelled) {
           livekitRoom.disconnect()
           return
         }
         setRoom(livekitRoom)
-        setStatus('语音通话已连接')
+        setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
         onConnectedConsumed()
       } catch (reason) {
         setStatus(reason instanceof Error ? reason.message : '通话服务连接失败')
@@ -539,7 +580,7 @@ function IncomingCallModal({
     return () => {
       cancelled = true
     }
-  }, [connectedSession, incoming.roomName, onConnectedConsumed, room])
+  }, [callKind, connectedSession, incoming.roomName, onConnectedConsumed, room])
 
   async function accept() {
     setAccepting(true)
@@ -548,17 +589,17 @@ function IncomingCallModal({
       if (incoming.type === 'call_group_started') {
         const result = await api.joinGroupCall(session.sessionId, incoming.roomName)
         setStatus('正在连接 LiveKit 房间…')
-        const livekitRoom = await connectLiveKitRoom(result, 'voice')
+        const livekitRoom = await connectLiveKitRoom(result, callKind, { local: localVideoRef.current, remote: remoteVideoRef.current })
         setRoom(livekitRoom)
-        setStatus('语音通话已连接')
+        setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
         return
       }
       const result = await api.signalPrivateCall(session.sessionId, incoming.fromUserId, 'call_accept', incoming.roomName)
       const sessionToConnect = { ...result, roomName: result.roomName || incoming.roomName }
       setStatus('正在连接 LiveKit 房间…')
-      const livekitRoom = await connectLiveKitRoom(sessionToConnect, 'voice')
+      const livekitRoom = await connectLiveKitRoom(sessionToConnect, callKind, { local: localVideoRef.current, remote: remoteVideoRef.current })
       setRoom(livekitRoom)
-      setStatus('语音通话已连接')
+      setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '接听失败')
       setAccepting(false)
@@ -573,7 +614,7 @@ function IncomingCallModal({
     onClose()
   }
 
-  return <div className="call-backdrop"><section className="call-card"><div className="call-pulse"><Avatar initials={incoming.type === 'call_group_started' ? '群' : '来'} color="#d48758" size="lg" /></div><h2>{incoming.type === 'call_group_started' ? `群聊 ${incoming.groupId}` : `用户 ${incoming.fromUserId}`}</h2><p>邀请你进行语音通话</p><div className="call-status"><Wifi />{status}</div><div className="call-room">房间：{incoming.roomName}</div><div className="call-buttons">{!room && <button className="primary-button" disabled={accepting} onClick={accept} title="接听"><Phone /></button>}<button className="hangup" onClick={close} title={room ? '挂断' : '拒绝'}><Phone /></button></div></section></div>
+  return <div className="call-backdrop"><section className={`call-card ${callKind === 'video' ? 'video-call-card' : ''}`}>{callKind === 'video' ? <div className="call-video-stage"><div className="call-video-remote" ref={remoteVideoRef}><span>等待对方视频…</span></div><div className="call-video-local" ref={localVideoRef}><span>本地视频</span></div></div> : <div className="call-pulse"><Avatar initials={incoming.type === 'call_group_started' ? '群' : '来'} color="#d48758" size="lg" /></div>}<h2>{incoming.type === 'call_group_started' ? `群聊 ${incoming.groupId}` : `用户 ${incoming.fromUserId}`}</h2><p>邀请你进行{callKind === 'video' ? '视频' : '语音'}通话</p><div className="call-status"><Wifi />{status}</div><div className="call-room">房间：{incoming.roomName}</div><div className="call-buttons">{!room && <button className="primary-button" disabled={accepting} onClick={accept} title="接听"><Phone /></button>}<button className="hangup" onClick={close} title={room ? '挂断' : '拒绝'}><Phone /></button></div></section></div>
 }
 
 function MainApp({ session, onLogout }: { session: Session; onLogout: () => void }) {
@@ -657,11 +698,11 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
           return
         }
         if (payload.type === 'call_invite' && payload.fromUserId && payload.roomName) {
-          setIncomingCall({ type: 'call_invite', callId: payload.callId, fromUserId: payload.fromUserId, roomName: payload.roomName })
+          setIncomingCall({ type: 'call_invite', callId: payload.callId, fromUserId: payload.fromUserId, roomName: payload.roomName, callKind: payload.callKind || 'voice' })
           return
         }
         if (payload.type === 'call_group_started' && payload.fromUserId && payload.groupId && payload.roomName) {
-          setIncomingCall({ type: 'call_group_started', callId: payload.callId, fromUserId: payload.fromUserId, groupId: payload.groupId, roomName: payload.roomName })
+          setIncomingCall({ type: 'call_group_started', callId: payload.callId, fromUserId: payload.fromUserId, groupId: payload.groupId, roomName: payload.roomName, callKind: payload.callKind || 'voice' })
           return
         }
         if (payload.type === 'call_accepted_with_token' && payload.roomName && payload.token && payload.livekitUrl) {

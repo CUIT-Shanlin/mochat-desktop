@@ -110,7 +110,8 @@ export const api = {
   sendFriendRequest: (sessionId: string, toUserId: EntityId, sign = '') => apiRequest<{ request: BackendFriendRequest }>('/friends/requests', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, sign }) }),
   receivedFriendRequests: (sessionId: string) => apiRequest<{ requests?: BackendFriendRequest[] }>(`/friends/requests/received?sessionId=${encodeURIComponent(sessionId)}`),
   handleFriendRequest: (sessionId: string, requestId: EntityId, action: 'accept' | 'reject') => apiRequest<{ request: BackendFriendRequest }>(`/friends/requests/${requestId}/handle`, { method: 'POST', body: JSON.stringify({ sessionId, action }) }),
-  startPrivateCall: (sessionId: string, toUserId: EntityId) => callRequest<CallSession>('/calls/private/invite', { method: 'POST', body: JSON.stringify({ sessionId, toUserId }) }),
+  startPrivateCall: (sessionId: string, toUserId: EntityId, callKind: 'voice' | 'video' = 'voice') =>
+    callRequest<CallSession>('/calls/private/invite', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, callKind }) }),
   signalPrivateCall: (sessionId: string, toUserId: EntityId, type: 'call_accept' | 'call_reject' | 'call_hangup', roomName: string) =>
     callRequest<CallSession>('/calls/private/signal', { method: 'POST', body: JSON.stringify({ sessionId, toUserId, type, roomName }) }),
   startGroupCall: (sessionId: string, groupId: EntityId) => callRequest<CallSession>('/calls/group/start', { method: 'POST', body: JSON.stringify({ sessionId, groupId }) }),

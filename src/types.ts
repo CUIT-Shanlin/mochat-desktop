@@ -104,6 +104,7 @@ export interface CallSession {
   fromUserId?: EntityId
   toUserId?: EntityId
   groupId?: EntityId
+  callKind?: 'voice' | 'video'
   token?: string
   livekitUrl?: string
   queuedUserIds?: EntityId[]
@@ -116,6 +117,7 @@ export interface CallSignalPayload {
   toUserId?: EntityId
   groupId?: EntityId
   roomName?: string
+  callKind?: 'voice' | 'video'
   token?: string
   livekitUrl?: string
   timestampMillis?: number
@@ -128,4 +130,5 @@ export interface IncomingCall {
   fromUserId: EntityId
   groupId?: EntityId
   roomName: string
+  callKind?: 'voice' | 'video'
 }

@@ -159,7 +159,7 @@ export class CallSignaling {
   connect(sessionId: string, onSignal: (payload: CallSignalPayload) => void) {
     this.socket = new WebSocket(`${getCallWsUrl()}/calls/ws/${encodeURIComponent(sessionId)}`)
     this.socket.onmessage = (event) => {
-      try { onSignal(JSON.parse(event.data) as CallSignalPayload) } catch { onSignal({ type: 'raw', message: String(event.data) }) }
+      try { onSignal(parseJsonPreservingLargeIntegers(String(event.data)) as unknown as CallSignalPayload) } catch { onSignal({ type: 'raw', message: String(event.data) }) }
     }
     return this.socket
   }

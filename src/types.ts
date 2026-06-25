@@ -101,20 +101,20 @@ export interface MediaUpload {
 export interface CallSession {
   callId?: string
   roomName: string
-  fromUserId?: number
-  toUserId?: number
-  groupId?: number
+  fromUserId?: EntityId
+  toUserId?: EntityId
+  groupId?: EntityId
   token?: string
   livekitUrl?: string
-  queuedUserIds?: number[]
+  queuedUserIds?: EntityId[]
 }
 
 export interface CallSignalPayload {
   type: string
   callId?: string
-  fromUserId?: number
-  toUserId?: number
-  groupId?: number
+  fromUserId?: EntityId
+  toUserId?: EntityId
+  groupId?: EntityId
   roomName?: string
   token?: string
   livekitUrl?: string

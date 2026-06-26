@@ -108,12 +108,18 @@ const mediaRequest = <T>(path: string, init?: RequestInit) => request<T>(getMedi
 async function desktopHttpRequest(url: string, init?: RequestInit) {
   const headerEntries = Object.fromEntries(new Headers(init?.headers ?? undefined).entries())
   if (window.mochatDesktop?.http?.request && !(init?.body instanceof FormData)) {
-    return window.mochatDesktop.http.request({
+    const attempt = () => window.mochatDesktop!.http!.request({
       url,
       method: init?.method,
       headers: headerEntries,
       body: typeof init?.body === 'string' ? init.body : undefined,
     })
+    let result = await attempt()
+    if (result.status === 0 && !result.ok) {
+      await new Promise((r) => setTimeout(r, 500))
+      result = await attempt()
+    }
+    return result
   }
 
   const response = await fetch(url, {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, safeStorage } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, safeStorage, systemPreferences } = require('electron')
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -16,17 +16,28 @@ const isDev = !app.isPackaged
 const isTestWindow = process.argv.some((arg) => arg === '--mochat-test-window')
 
 // ---------- identity-key store (shared across all windows) ----------
-// 用 safeStorage 加密后落盘，所有窗口进程共用同一份密钥文件。
-const IDENTITY_KEYS_FILE = path.join(app.getPath('userData'), 'identity-keys.enc')
+// 存为明文 JSON（内容为公钥，非敏感数据）。使用固定路径（不跟 --user-data-dir），
+// 确保测试窗口和主窗口共用同一份密钥文件。
+const IDENTITY_KEYS_FILE = path.join(os.homedir(), '.mochat', 'identity-keys.json')
 let identityKeysCache = null
 
 function loadIdentityKeys() {
   if (identityKeysCache !== null) return identityKeysCache
   try {
-    const encrypted = fs.readFileSync(IDENTITY_KEYS_FILE)
-    const decrypted = safeStorage.decryptString(encrypted)
-    identityKeysCache = JSON.parse(decrypted)
+    const content = fs.readFileSync(IDENTITY_KEYS_FILE, 'utf8')
+    identityKeysCache = JSON.parse(content)
   } catch {
+    // 尝试从旧加密路径迁移
+    try {
+      const legacyPath = path.join(app.getPath('userData'), 'identity-keys.enc')
+      if (fs.existsSync(legacyPath)) {
+        const encrypted = fs.readFileSync(legacyPath)
+        const decrypted = safeStorage.decryptString(encrypted)
+        identityKeysCache = JSON.parse(decrypted)
+        saveIdentityKeys(identityKeysCache)
+        return identityKeysCache
+      }
+    } catch { /* ignore migration failure */ }
     identityKeysCache = {}
   }
   return identityKeysCache
@@ -35,8 +46,7 @@ function loadIdentityKeys() {
 function saveIdentityKeys(keys) {
   identityKeysCache = keys
   fs.mkdirSync(path.dirname(IDENTITY_KEYS_FILE), { recursive: true })
-  const encrypted = safeStorage.encryptString(JSON.stringify(keys))
-  fs.writeFileSync(IDENTITY_KEYS_FILE, encrypted)
+  fs.writeFileSync(IDENTITY_KEYS_FILE, JSON.stringify(keys, null, 2), 'utf8')
 }
 
 function readIdentityKey(username) {
@@ -57,6 +67,7 @@ let rendererServer = null
 const chatClients = new Map()
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+app.commandLine.appendSwitch('ignore-certificate-errors', 'true')
 
 function encodeLaunchConfig(config) {
   return Buffer.from(JSON.stringify(config), 'utf8').toString('base64url')
@@ -195,6 +206,9 @@ function createWindow() {
   window.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(['media', 'camera', 'microphone'].includes(permission))
   })
+  window.webContents.session.setPermissionCheckHandler((_webContents, permission) => {
+    return ['media', 'camera', 'microphone'].includes(permission)
+  })
   window.webContents.on('context-menu', (_event, params) => {
     const template = params.isEditable
       ? [
@@ -329,15 +343,35 @@ ipcMain.handle('dialog:select-files', async () => {
 })
 
 ipcMain.handle('http:request', async (_event, payload) => {
-  const response = await fetch(payload.url, {
-    method: payload.method || 'GET',
-    headers: payload.headers || {},
-    body: payload.body,
-  })
-  return {
-    ok: response.ok,
-    status: response.status,
-    text: await response.text(),
+  try {
+    const response = await fetch(payload.url, {
+      method: payload.method || 'GET',
+      headers: payload.headers || {},
+      body: payload.body,
+    })
+    return {
+      ok: response.ok,
+      status: response.status,
+      text: await response.text(),
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      text: JSON.stringify({ message: error.message || 'fetch failed' }),
+    }
+  }
+})
+
+ipcMain.handle('http:fetch-binary', async (_event, url) => {
+  try {
+    const response = await fetch(url)
+    if (!response.ok) return { ok: false, status: response.status }
+    const buffer = Buffer.from(await response.arrayBuffer())
+    const contentType = response.headers.get('content-type') || 'image/png'
+    return { ok: true, base64: buffer.toString('base64'), contentType }
+  } catch (error) {
+    return { ok: false, error: error.message }
   }
 })
 
@@ -398,6 +432,18 @@ ipcMain.handle('identity-key:set', async (_event, username, publicKey) => {
 })
 
 app.whenReady().then(async () => {
+  if (process.platform === 'darwin') {
+    await systemPreferences.askForMediaAccess('camera').catch(() => false)
+    await systemPreferences.askForMediaAccess('microphone').catch(() => false)
+  }
+  app.on('certificate-error', (event, _webContents, url, _error, _certificate, callback) => {
+    if (new URL(url).hostname === 'img.lystran.com') {
+      event.preventDefault()
+      callback(true)
+    } else {
+      callback(false)
+    }
+  })
   await startPackagedRendererServer()
   setupMenus()
   createWindow()

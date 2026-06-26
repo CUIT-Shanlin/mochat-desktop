@@ -145,9 +145,7 @@ export function decodeHistoryItem(item: BackendHistoryItem, kind: 'private' | 'g
       : decodeMessage(GroupMessageReq, bytes)
   } catch (error) {
     decoded = null
-    if (import.meta.env.DEV) {
-      console.warn('MoChat history payload protobuf decode failed, fallback to plain text', { kind, error })
-    }
+    console.warn('[MoChat] protobuf decode threw:', error)
   }
 
   // 历史数据兜底：早期入库的 payload_base64 是明文 UTF-8 字符串的 base64，
@@ -156,15 +154,174 @@ export function decodeHistoryItem(item: BackendHistoryItem, kind: 'private' | 'g
   // 都通过 contents 是否为空 + 内容类型是否齐全来判断是否走明文兜底。
   const contents = Array.isArray(decoded?.contents) ? (decoded!.contents as unknown[]) : []
   if (contents.length > 0 && hasRenderableContents(contents)) return decoded!
-  // 兜底：从原始字节里尝试找出可读文本，**绝不**直接把 protobuf header 字节当 utf-8 输出。
-  const fallback = extractReadableText(bytes)
-  if (fallback) return { contents: [{ plainText: { text: fallback } }] }
-  // 完全不可读：返回占位文本，避免 UI 出现 `\u0010�����3` 这种 protobuf header 字符。
+
+  // protobufjs failed — use manual protobuf field extraction
+  const manualResult = manualExtractContents(bytes, kind)
+  if (manualResult) return manualResult
+
   return { contents: [{ plainText: { text: '[无法解析的消息]' } }] }
 }
 
+function readVarint(bytes: Uint8Array, offset: number): [number, number] {
+  let value = 0
+  let shift = 0
+  while (offset < bytes.length) {
+    const b = bytes[offset++]
+    value |= (b & 0x7f) << shift
+    if (!(b & 0x80)) break
+    shift += 7
+  }
+  return [value, offset]
+}
+
+function manualExtractContents(bytes: Uint8Array, _kind: 'private' | 'group'): Record<string, unknown> | null {
+  try {
+    let offset = 0
+    while (offset < bytes.length) {
+      const [tagValue, nextOffset] = readVarint(bytes, offset)
+      offset = nextOffset
+      const fieldNumber = tagValue >>> 3
+      const wireType = tagValue & 0x07
+      if (wireType === 0) {
+        const [, after] = readVarint(bytes, offset)
+        offset = after
+      } else if (wireType === 2) {
+        const [len, dataStart] = readVarint(bytes, offset)
+        if (fieldNumber === 10) {
+          const msgBytes = bytes.subarray(dataStart, dataStart + len)
+          const content = parseMessageContent(msgBytes)
+          if (content) return { contents: [content] }
+        }
+        offset = dataStart + len
+      } else if (wireType === 5) {
+        offset += 4
+      } else if (wireType === 1) {
+        offset += 8
+      } else {
+        break
+      }
+    }
+  } catch { /* manual parse failed */ }
+  return null
+}
+
+function parseMessageContent(bytes: Uint8Array): Record<string, unknown> | null {
+  let offset = 0
+  while (offset < bytes.length) {
+    const [tagValue, nextOffset] = readVarint(bytes, offset)
+    offset = nextOffset
+    const fieldNumber = tagValue >>> 3
+    const wireType = tagValue & 0x07
+    if (wireType === 2) {
+      const [len, dataStart] = readVarint(bytes, offset)
+      const fieldData = bytes.subarray(dataStart, dataStart + len)
+      if (fieldNumber === 1) {
+        const ciphertext = parseCiphertextFromEncryptedText(fieldData)
+        if (ciphertext) {
+          let binary = ''
+          for (let i = 0; i < ciphertext.length; i++) binary += String.fromCharCode(ciphertext[i])
+          return { encryptedText: { ciphertext: btoa(binary) }, content: 'encryptedText' }
+        }
+      } else if (fieldNumber === 2) {
+        const text = parseStringField(fieldData, 1)
+        if (text) return { plainText: { text }, content: 'plainText' }
+      } else if (fieldNumber === 3) {
+        const media = parseMediaMetadata(fieldData)
+        if (media) return { media, content: 'media' }
+      }
+      offset = dataStart + len
+    } else if (wireType === 0) {
+      const [, after] = readVarint(bytes, offset)
+      offset = after
+    } else {
+      break
+    }
+  }
+  return null
+}
+
+function parseCiphertextFromEncryptedText(bytes: Uint8Array): Uint8Array | null {
+  let offset = 0
+  while (offset < bytes.length) {
+    const [tagValue, nextOffset] = readVarint(bytes, offset)
+    offset = nextOffset
+    const fieldNumber = tagValue >>> 3
+    const wireType = tagValue & 0x07
+    if (wireType === 2) {
+      const [len, dataStart] = readVarint(bytes, offset)
+      if (fieldNumber === 2) return bytes.subarray(dataStart, dataStart + len)
+      offset = dataStart + len
+    } else if (wireType === 0) {
+      const [, after] = readVarint(bytes, offset)
+      offset = after
+    } else {
+      break
+    }
+  }
+  return null
+}
+
+function parseStringField(bytes: Uint8Array, targetField: number): string | null {
+  let offset = 0
+  while (offset < bytes.length) {
+    const [tagValue, nextOffset] = readVarint(bytes, offset)
+    offset = nextOffset
+    const fieldNumber = tagValue >>> 3
+    const wireType = tagValue & 0x07
+    if (wireType === 2) {
+      const [len, dataStart] = readVarint(bytes, offset)
+      if (fieldNumber === targetField) {
+        return new TextDecoder().decode(bytes.subarray(dataStart, dataStart + len))
+      }
+      offset = dataStart + len
+    } else if (wireType === 0) {
+      const [, after] = readVarint(bytes, offset)
+      offset = after
+    } else {
+      break
+    }
+  }
+  return null
+}
+
+function parseMediaMetadata(bytes: Uint8Array): Record<string, unknown> | null {
+  const result: Record<string, unknown> = {}
+  let offset = 0
+  while (offset < bytes.length) {
+    const [tagValue, nextOffset] = readVarint(bytes, offset)
+    offset = nextOffset
+    const fieldNumber = tagValue >>> 3
+    const wireType = tagValue & 0x07
+    if (wireType === 2) {
+      const [len, dataStart] = readVarint(bytes, offset)
+      const str = new TextDecoder().decode(bytes.subarray(dataStart, dataStart + len))
+      if (fieldNumber === 2) result.mediaUrl = str
+      else if (fieldNumber === 3) result.thumbnailUrl = str
+      else if (fieldNumber === 5) result.mimeType = str
+      else if (fieldNumber === 6) result.fileName = str
+      else if (fieldNumber === 10) result.previewText = str
+      offset = dataStart + len
+    } else if (wireType === 0) {
+      const [value, after] = readVarint(bytes, offset)
+      if (fieldNumber === 1) result.type = value
+      else if (fieldNumber === 4) result.fileSize = value
+      else if (fieldNumber === 7) result.duration = value
+      else if (fieldNumber === 8) result.width = value
+      else if (fieldNumber === 9) result.height = value
+      offset = after
+    } else if (wireType === 5) {
+      offset += 4
+    } else if (wireType === 1) {
+      offset += 8
+    } else {
+      break
+    }
+  }
+  if (result.mediaUrl || result.fileName || result.previewText) return result
+  return null
+}
+
 // 仅在 contents 真的有可渲染内容（plainText/encryptedText/media 任一字段非空）时才视为成功解析。
-// 部分 protobufjs 解码会返回 `contents: [{}]` 这种空对象，下面的判断会把它们当 fallback 处理。
 function hasRenderableContents(contents: unknown[]): boolean {
   for (const content of contents) {
     if (!content || typeof content !== 'object') continue
@@ -179,24 +336,6 @@ function hasRenderableContents(contents: unknown[]): boolean {
   return false
 }
 
-// 从 raw bytes 中尽量提取可读文本。优先尝试严格 utf-8（fatal），失败就退到 printable ASCII 子串。
-// 这样可以避免显示 `\u0010�����3 ����ڙ��� �������� R$ " 123456789012 tcp verify hello 2` 这种
-// "protobuf header 字节 + 末尾明文" 的混合乱码——header 部分的二进制会被剥掉，只保留明文片段。
-function extractReadableText(bytes: Uint8Array): string {
-  if (bytes.length === 0) return ''
-  // 1. 严格 utf-8：合法明文会直接命中。
-  try {
-    const strict = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-    if (strict.trim()) return strict
-  } catch {
-    // 非法 utf-8：继续往下走
-  }
-  // 2. 非严格 utf-8：保留明文段，但丢弃 U+FFFD 替换符。
-  const lenient = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
-  const cleaned = lenient.replace(/\uFFFD/g, '').trim()
-  if (cleaned) return cleaned
-  return ''
-}
 
 export function decodeRealtimeDelivery(payload: unknown) {
   const delivery = payload as ChatGatewayDelivery
@@ -215,15 +354,35 @@ export function decodeErrorResponse(payload: unknown) {
   return payload as ChatGatewayError
 }
 
+function decodeCiphertextBytes(ciphertext: unknown): string {
+  if (!ciphertext) return ''
+  if (typeof ciphertext === 'string') {
+    return new TextDecoder().decode(base64ToBytes(ciphertext))
+  }
+  if (ciphertext instanceof Uint8Array || ciphertext instanceof ArrayBuffer) {
+    return new TextDecoder().decode(ciphertext)
+  }
+  if (typeof ciphertext === 'object' && ciphertext !== null) {
+    const obj = ciphertext as Record<string, number>
+    const keys = Object.keys(obj)
+    if (keys.length > 0 && keys.every((k) => !Number.isNaN(Number(k)))) {
+      const bytes = new Uint8Array(keys.length)
+      for (let i = 0; i < keys.length; i++) bytes[i] = obj[String(i)]
+      return new TextDecoder().decode(bytes)
+    }
+  }
+  return String(ciphertext)
+}
+
 export function extractTextFromDecodedPayload(payload: Record<string, unknown>) {
   const contents = Array.isArray(payload.contents) ? payload.contents as Array<Record<string, unknown>> : []
   for (const content of contents) {
     const plain = content.plainText as { text?: string } | undefined
     if (plain?.text) return plain.text
-    const encrypted = content.encryptedText as { ciphertext?: string } | undefined
+    const encrypted = content.encryptedText as { ciphertext?: unknown } | undefined
     if (encrypted?.ciphertext) {
       try {
-        return new TextDecoder().decode(base64ToBytes(encrypted.ciphertext))
+        return decodeCiphertextBytes(encrypted.ciphertext)
       } catch {
         return '[加密消息]'
       }
@@ -258,7 +417,7 @@ export function toHistoryDelivery(item: BackendHistoryItem, kind: 'private' | 'g
     seq: item.seq,
     serverTimeMs: item.serverTimeMs,
     conversationId: item.conversationId,
-    fromUid: '0',
+    fromUid: item.senderUid !== undefined && item.senderUid !== null ? String(item.senderUid) : '0',
     contents,
     payloadType: kind === 'private' ? 'privatePayload' : 'groupPayload',
     ...payload,

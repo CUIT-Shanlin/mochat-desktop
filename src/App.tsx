@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { MutableRefObject } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { MutableRefObject, ReactNode } from 'react'
 import {
   Check, ChevronDown, ContactRound, FileText, Image, Info, LogOut, Menu,
   MessageSquare, Mic, Minus, MoreVertical, Paperclip, Phone, Plus, Search, Send,
@@ -101,12 +101,33 @@ function messageTime(serverTimeMs: number) {
   return new Date(serverTimeMs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+function decodeCiphertext(ciphertext: unknown): string {
+  if (!ciphertext) return ''
+  if (typeof ciphertext === 'string') {
+    const bytes = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0))
+    return new TextDecoder().decode(bytes)
+  }
+  if (ciphertext instanceof Uint8Array || ciphertext instanceof ArrayBuffer) {
+    return new TextDecoder().decode(ciphertext)
+  }
+  if (typeof ciphertext === 'object' && ciphertext !== null) {
+    const obj = ciphertext as Record<string, number>
+    const keys = Object.keys(obj)
+    if (keys.length > 0 && keys.every((k) => !Number.isNaN(Number(k)))) {
+      const bytes = new Uint8Array(keys.length)
+      for (let i = 0; i < keys.length; i++) bytes[i] = obj[String(i)]
+      return new TextDecoder().decode(bytes)
+    }
+  }
+  return String(ciphertext)
+}
+
 function extractText(contents: ChatGatewayContent[] | undefined) {
   for (const content of contents ?? []) {
     if (content.plainText?.text) return content.plainText.text
     if (content.encryptedText?.ciphertext) {
       try {
-        return new TextDecoder().decode(Uint8Array.from(atob(content.encryptedText.ciphertext), (char) => char.charCodeAt(0)))
+        return decodeCiphertext(content.encryptedText.ciphertext)
       } catch {
         return '[加密消息]'
       }
@@ -126,6 +147,8 @@ function mediaFields(contents: ChatGatewayContent[] | undefined) {
 }
 
 function deliveryToChatMessage(message: ChatGatewayDelivery, session: Session, fallbackFromMe = false): ChatMessage {
+  const fields = mediaFields(message.contents)
+  if (fields.mediaUrl) console.log('[MoChat] media message mediaUrl:', fields.mediaUrl, 'resolved:', resolveMediaUrl(fields.mediaUrl))
   return {
     id: message.msgId,
     seq: message.seq,
@@ -134,7 +157,7 @@ function deliveryToChatMessage(message: ChatGatewayDelivery, session: Session, f
     text: extractText(message.contents),
     time: messageTime(Number(message.serverTimeMs)),
     status: 'sent',
-    ...mediaFields(message.contents),
+    ...fields,
   }
 }
 
@@ -191,6 +214,40 @@ function inferMediaKind(mimeType: string) {
   if (mimeType.startsWith('video/')) return 'video'
   if (mimeType.startsWith('audio/')) return 'audio'
   return 'file'
+}
+
+function resolveMediaUrl(url: string): string {
+  if (!url) return url
+  if (/^https?:\/\//.test(url)) return url
+  let path = url.startsWith('/') ? url : `/${url}`
+  path = path.replace(/^\/media\/download/, '')
+  return `https://img.lystran.com${path}`
+}
+
+function CdnImage({ src, alt, className, onClick }: { src: string; alt: string; className?: string; onClick?: () => void }) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const res = await fetch(src)
+        if (cancelled) return
+        if (!res.ok) { setError(`HTTP ${res.status}`); return }
+        const blob = await res.blob()
+        if (cancelled) return
+        setBlobUrl(URL.createObjectURL(blob))
+      } catch (e: any) {
+        if (!cancelled) setError(e.message || 'fetch failed')
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [src])
+  useEffect(() => { return () => { if (blobUrl) URL.revokeObjectURL(blobUrl) } }, [blobUrl])
+  if (error) return <span className="message-image-error">[图片加载失败] {src} ({error})</span>
+  if (!blobUrl) return <span className="message-image-loading">加载中...</span>
+  return <img src={blobUrl} alt={alt} className={className} onClick={onClick} />
 }
 
 function friendRequestToViewModel(request: BackendFriendRequest): FriendRequest {
@@ -318,14 +375,29 @@ function Chat({
   const [error, setError] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const current = messages.filter((message) => message.conversationId === conversation.id)
+  function handlePaste(event: React.ClipboardEvent) {
+    const items = event.clipboardData?.items
+    if (!items) return
+    const imageFiles: File[] = []
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile()
+        if (file) imageFiles.push(file)
+      }
+    }
+    if (imageFiles.length > 0) {
+      event.preventDefault()
+      setAttachments((prev) => [...prev, ...imageFiles])
+    }
+  }
   async function send() {
     const files = attachments
-    const text = draft.trim() || (files.length ? `附件：${files.map((file) => file.name).join('、')}` : '')
-    if (!text || sending) return
+    if (!draft.trim() && !files.length) return
+    if (sending) return
     setSending(true)
     setError('')
     try {
-      await onSend(text, files)
+      await onSend(draft.trim(), files)
       setDraft('')
       setAttachments([])
       if (fileInputRef.current) fileInputRef.current.value = ''
@@ -341,15 +413,15 @@ function Chat({
       <div className="date-divider"><span>今天</span></div>
       {current.length === 0 ? <EmptyState icon={<MessageSquare />} title="开始聊天" text={`向 ${conversation.name} 发送第一条消息`} /> : current.map((message) => <div key={message.id} className={`message-row ${message.fromMe ? 'mine' : ''}`}>
         {!message.fromMe && <Avatar initials={conversation.initials} color={conversation.color} size="sm" />}
-        <div><div className="message-bubble">{message.text}</div><div className="message-time">{message.time}{message.fromMe && message.status === 'read' && <><Check /><Check /></>}</div></div>
+        <div><div className="message-bubble">{message.mediaUrl ? <CdnImage src={resolveMediaUrl(message.mediaUrl)} alt={message.fileName || '图片'} className="message-image" onClick={() => window.open(resolveMediaUrl(message.mediaUrl!), '_blank')} /> : message.text}</div><div className="message-time">{message.time}{message.fromMe && message.status === 'read' && <><Check /><Check /></>}</div></div>
       </div>)}
     </div>
     <footer className="composer">
-      {attachments.length > 0 && <div className="attachment-preview"><FileText /><span>{attachments.map((file) => file.name).join('、')}</span><button onClick={() => setAttachments([])}><X /></button></div>}
+      {attachments.length > 0 && <div className="attachment-preview">{attachments.some((f) => f.type.startsWith('image/')) ? attachments.filter((f) => f.type.startsWith('image/')).map((f, i) => <img key={i} src={URL.createObjectURL(f)} alt={f.name} className="attachment-thumb" />) : <><FileText /><span>{attachments.map((file) => file.name).join('、')}</span></>}<button onClick={() => setAttachments([])}><X /></button></div>}
       {error && <div className="composer-error">{error}</div>}
       <input ref={fileInputRef} className="file-picker" type="file" multiple onChange={(event) => setAttachments(Array.from(event.target.files ?? []))} />
       <div className="composer-tools"><button title="表情"><Smile /></button><button title="选择图片" onClick={() => fileInputRef.current?.click()}><Image /></button><button title="添加附件" onClick={() => fileInputRef.current?.click()}><Paperclip /></button><button title="语音消息"><Mic /></button></div>
-      <textarea aria-label="消息" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() } }} placeholder="输入消息，Enter 发送，Shift + Enter 换行" />
+      <textarea aria-label="消息" value={draft} onChange={(event) => setDraft(event.target.value)} onPaste={handlePaste} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send() } }} placeholder="输入消息，Enter 发送，Shift + Enter 换行" />
       <button className="send-button" disabled={sending || (!draft.trim() && !attachments.length)} onClick={send}><Send /><span>{sending ? '发送中' : '发送'}</span></button>
     </footer>
   </section>
@@ -646,9 +718,34 @@ type CallVideoTargets = {
   remote?: HTMLElement | null
 }
 
-async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUrl'>, kind: 'voice' | 'video', videoTargets: CallVideoTargets = {}) {
+async function acquireLocalMedia(kind: 'voice' | 'video'): Promise<MediaStream> {
+  const constraints: MediaStreamConstraints = { audio: true }
+  if (kind === 'video') constraints.video = { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints)
+  } catch (e) {
+    if (kind === 'video') {
+      console.warn('[MoChat] video acquisition failed, falling back to audio-only', e)
+      return navigator.mediaDevices.getUserMedia({ audio: true })
+    }
+    throw e
+  }
+}
+
+function stopLocalMedia(stream: MediaStream | null) {
+  if (!stream) return
+  for (const track of stream.getTracks()) track.stop()
+}
+
+async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUrl'>, kind: 'voice' | 'video', videoTargets: CallVideoTargets = {}, localStream?: MediaStream | null) {
   if (!result.token || !result.livekitUrl) throw new Error('通话令牌未返回')
-  const { Room, RoomEvent, Track } = await import('livekit-client')
+  let Room: any, RoomEvent: any, Track: any
+  try {
+    const lk = await import('livekit-client')
+    Room = lk.Room; RoomEvent = lk.RoomEvent; Track = lk.Track
+  } catch (e) {
+    throw new Error('LiveKit 客户端加载失败')
+  }
   const livekitRoom = new Room()
   const remoteAudioElements = new Set<HTMLMediaElement>()
   const videoElements = new Set<HTMLMediaElement>()
@@ -691,15 +788,13 @@ async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUr
     videoTargets.local?.replaceChildren()
     videoTargets.remote?.replaceChildren()
   }
-  livekitRoom.on(RoomEvent.TrackSubscribed, (track) => {
-    attachRemoteAudio(track)
-    attachVideo(track, videoTargets.remote)
+  livekitRoom.on(RoomEvent.TrackSubscribed, (track: AttachableTrack) => {
+    try { attachRemoteAudio(track); attachVideo(track, videoTargets.remote) } catch (e) { console.warn('[MoChat] track subscribe error', e) }
   })
-  livekitRoom.on(RoomEvent.TrackUnsubscribed, (track) => detachTrack(track))
+  livekitRoom.on(RoomEvent.TrackUnsubscribed, (track: AttachableTrack) => {
+    try { detachTrack(track) } catch (e) { console.warn('[MoChat] track unsubscribe error', e) }
+  })
   livekitRoom.on(RoomEvent.Disconnected, removeAllMedia)
-  // LiveKit client 的 Room.connect() 在 WebSocket 握手失败时不一定 throw，
-  // 为了避免一直卡在「正在连接 LiveKit 房间…」状态，这里同时挂一个
-  // 断开事件 + 15 秒连接超时，保证 connectLiveKitRoom 一定会 resolve/reject。
   let rejectConnect: ((reason: Error) => void) | null = null
   const disconnectedPromise = new Promise<never>((_, reject) => {
     rejectConnect = reject
@@ -726,6 +821,9 @@ async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUr
     livekitRoom.off(RoomEvent.Disconnected, onDisconnectedForConnect)
     if (timeoutHandle) clearTimeout(timeoutHandle)
   }
+  if (localStream) {
+    stopLocalMedia(localStream)
+  }
   await livekitRoom.startAudio().catch((reason: unknown) => console.warn('MoChat audio playback start failed', reason))
   for (const participant of livekitRoom.remoteParticipants.values()) {
     for (const publication of participant.audioTrackPublications.values()) {
@@ -735,9 +833,10 @@ async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUr
       if (publication.track) attachVideo(publication.track, videoTargets.remote)
     }
   }
-  await livekitRoom.localParticipant.setMicrophoneEnabled(true)
+  await livekitRoom.localParticipant.setMicrophoneEnabled(true).catch((e: unknown) => console.warn('[MoChat] mic enable failed', e))
   if (kind === 'video') {
-    await livekitRoom.localParticipant.setCameraEnabled(true)
+    await livekitRoom.localParticipant.setCameraEnabled(true).catch((e: unknown) => console.warn('[MoChat] camera enable failed', e))
+    // Attach local camera track to local video container
     for (const publication of livekitRoom.localParticipant.videoTrackPublications.values()) {
       if (publication.track) attachVideo(publication.track, videoTargets.local)
     }
@@ -745,18 +844,60 @@ async function connectLiveKitRoom(result: Pick<CallSession, 'token' | 'livekitUr
   return livekitRoom
 }
 
+class CallErrorBoundary extends Component<{ onClose: () => void; children: ReactNode }, { error: string | null }> {
+  state = { error: null as string | null }
+  static getDerivedStateFromError(error: Error) { return { error: error.message || '通话组件异常' } }
+  componentDidCatch(error: Error) { console.error('[MoChat] call component crashed', error) }
+  render() {
+    if (this.state.error) return <div className="call-backdrop"><section className="call-card"><h2>通话异常</h2><p style={{ color: '#ff9ba4', margin: '16px 0' }}>{this.state.error}</p><div className="call-buttons"><button className="primary-button" onClick={this.props.onClose}>关闭</button></div></section></div>
+    return this.props.children
+  }
+}
+
+function useLocalPreview(stream: MediaStream | null, containerRef: React.RefObject<HTMLDivElement | null>) {
+  useEffect(() => {
+    const container = containerRef.current
+    if (!stream || !container) return
+    const video = document.createElement('video')
+    video.autoplay = true
+    video.muted = true
+    video.playsInline = true
+    video.style.width = '100%'
+    video.style.height = '100%'
+    video.style.objectFit = 'cover'
+    video.srcObject = stream
+    container.replaceChildren(video)
+    return () => {
+      video.srcObject = null
+      if (container.contains(video)) container.removeChild(video)
+    }
+  }, [stream, containerRef])
+}
+
 function CallModal({ session, conversation, kind, onClose }: { session: Session; conversation: Conversation; kind: 'voice' | 'video'; onClose: () => void }) {
-  const [status, setStatus] = useState('正在请求通话服务…')
+  const [status, setStatus] = useState('正在获取摄像头/麦克风…')
   const [callSession, setCallSession] = useState<CallSession | null>(null)
   const [room, setRoom] = useState<Room | null>(null)
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null)
   const localVideoRef = useRef<HTMLDivElement | null>(null)
   const remoteVideoRef = useRef<HTMLDivElement | null>(null)
+  useLocalPreview(!room ? localStream : null, localVideoRef)
 
   useEffect(() => {
     let cancelled = false
     let activeRoom: Room | null = null
+    let stream: MediaStream | null = null
     async function startCall() {
       try {
+        try {
+          stream = await acquireLocalMedia(kind)
+        } catch (mediaError) {
+          console.warn('[MoChat] media acquisition failed, falling back to audio-only', mediaError)
+          stream = await acquireLocalMedia('voice')
+        }
+        if (cancelled) { stopLocalMedia(stream); return }
+        setLocalStream(stream)
+        setStatus('正在请求通话服务…')
         const result = conversation.kind === 'group'
           ? await api.startGroupCall(session.sessionId, conversation.targetId, kind)
           : await api.startPrivateCall(session.sessionId, conversation.targetId, kind)
@@ -767,7 +908,8 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
           return
         }
         setStatus('正在连接 LiveKit 房间…')
-        const livekitRoom = await connectLiveKitRoom(result, kind, { local: localVideoRef.current, remote: remoteVideoRef.current })
+        const livekitRoom = await connectLiveKitRoom(result, kind, { local: localVideoRef.current, remote: remoteVideoRef.current }, stream)
+        stream = null
         activeRoom = livekitRoom
         if (cancelled) {
           livekitRoom.disconnect()
@@ -782,11 +924,13 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
     startCall()
     return () => {
       cancelled = true
+      stopLocalMedia(stream)
       activeRoom?.disconnect()
     }
   }, [conversation.kind, conversation.targetId, kind, session.sessionId])
 
   async function hangup() {
+    stopLocalMedia(localStream)
     if (callSession?.roomName && conversation.kind === 'group') {
       await api.leaveGroupCall(session.sessionId, callSession.roomName).catch(() => undefined)
     }
@@ -794,7 +938,11 @@ function CallModal({ session, conversation, kind, onClose }: { session: Session;
     onClose()
   }
 
-  return <div className="call-backdrop"><section className={`call-card ${kind === 'video' ? 'video-call-card' : ''}`}>{kind === 'video' ? <div className="call-video-stage"><div className="call-video-remote" ref={remoteVideoRef}><span>等待对方视频…</span></div><div className="call-video-local" ref={localVideoRef}><span>本地视频</span></div></div> : <div className="call-pulse"><Avatar initials={conversation.initials} color={conversation.color} size="lg" /></div>}<h2>{conversation.name}</h2><p>{kind === 'video' ? '正在发起视频通话…' : '正在发起语音通话…'}</p><div className="call-status"><Wifi />{status}</div>{callSession?.roomName && <div className="call-room">房间：{callSession.roomName}</div>}<div className="call-buttons"><button title="扬声器"><Volume2 /></button><button title="麦克风"><Mic /></button><button className="hangup" onClick={hangup} title="挂断"><Phone /></button></div></section></div>
+  return <div className="call-backdrop"><section className={`call-card ${kind === 'video' ? 'video-call-card' : ''}`}>
+    <div className="call-video-stage" style={{ display: kind === 'video' ? undefined : 'none' }}><div className="call-video-remote" ref={remoteVideoRef} /><div className="call-video-local" ref={localVideoRef} /></div>
+    {kind !== 'video' && <div className="call-pulse"><Avatar initials={conversation.initials} color={conversation.color} size="lg" /></div>}
+    <h2>{conversation.name}</h2><p>{kind === 'video' ? '正在发起视频通话…' : '正在发起语音通话…'}</p><div className="call-status"><Wifi />{status}</div>{callSession?.roomName && <div className="call-room">房间：{callSession.roomName}</div>}<div className="call-buttons"><button title="扬声器"><Volume2 /></button><button title="麦克风"><Mic /></button><button className="hangup" onClick={hangup} title="挂断"><Phone /></button></div>
+  </section></div>
 }
 
 function IncomingCallModal({
@@ -815,56 +963,78 @@ function IncomingCallModal({
   const [status, setStatus] = useState('收到通话邀请')
   const [room, setRoom] = useState<Room | null>(null)
   const [accepting, setAccepting] = useState(false)
-  const callKind = incoming.callKind || 'voice'
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null)
+  const [chosenKind, setChosenKind] = useState<'voice' | 'video'>(incoming.callKind || 'voice')
   const localVideoRef = useRef<HTMLDivElement | null>(null)
   const remoteVideoRef = useRef<HTMLDivElement | null>(null)
-  // onConnectedConsumed 用 ref 持有最新回调引用，避免父组件匿名箭头函数导致 effect 反复触发
-  // 死循环（每次父组件重渲染都重新走一遍 connectLiveKitRoom，LiveKit 连接被反复打断，
-  // await 永远走不到 setStatus('视频通话已连接')，本地摄像头也没机会开启）。
   const onConnectedConsumedRef = useRef(onConnectedConsumed)
+  const mountedRef = useRef(true)
+  useLocalPreview(!room ? localStream : null, localVideoRef)
   useEffect(() => {
     onConnectedConsumedRef.current = onConnectedConsumed
   })
+  useEffect(() => () => { mountedRef.current = false }, [])
 
   useEffect(() => {
     if (!connectedSession || connectedSession.roomName !== incoming.roomName || room) return
     const sessionToConnect = connectedSession
     let cancelled = false
+    let stream: MediaStream | null = null
     async function connectAcceptedPrivateCall() {
       try {
+        try {
+          stream = await acquireLocalMedia(chosenKind)
+        } catch (mediaError) {
+          console.warn('[MoChat] media acquisition failed, falling back to audio-only', mediaError)
+          stream = await acquireLocalMedia('voice')
+        }
+        if (cancelled) { stopLocalMedia(stream); return }
+        setLocalStream(stream)
         setStatus('正在连接 LiveKit 房间…')
-        const livekitRoom = await connectLiveKitRoom(sessionToConnect, callKind, { local: localVideoRef.current, remote: remoteVideoRef.current })
-        if (cancelled) {
+        const livekitRoom = await connectLiveKitRoom(sessionToConnect, chosenKind, { local: localVideoRef.current, remote: remoteVideoRef.current }, stream)
+        stream = null
+        if (cancelled || !mountedRef.current) {
           livekitRoom.disconnect()
           return
         }
         setRoom(livekitRoom)
-        setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
+        setStatus(chosenKind === 'video' ? '视频通话已连接' : '语音通话已连接')
         onConnectedConsumedRef.current()
       } catch (reason) {
-        setStatus(reason instanceof Error ? reason.message : '通话服务连接失败')
+        if (mountedRef.current) setStatus(reason instanceof Error ? reason.message : '通话服务连接失败')
       }
     }
     connectAcceptedPrivateCall()
     return () => {
       cancelled = true
+      stopLocalMedia(stream)
     }
-  }, [callKind, connectedSession, incoming.roomName, room])
+  }, [chosenKind, connectedSession, incoming.roomName, room])
 
-  async function accept() {
+  async function accept(kind: 'voice' | 'video') {
     setAccepting(true)
+    setChosenKind(kind)
     setStatus('正在接听…')
     try {
+      let stream: MediaStream | null = null
+      try {
+        stream = await acquireLocalMedia(kind)
+      } catch (mediaError) {
+        console.warn('[MoChat] media acquisition failed on accept, trying audio-only', mediaError)
+        stream = await acquireLocalMedia('voice')
+      }
+      if (!mountedRef.current) { stopLocalMedia(stream); return }
+      setLocalStream(stream)
       if (incoming.type === 'call_group_started') {
         const result = await api.joinGroupCall(session.sessionId, incoming.roomName)
+        if (!mountedRef.current) { stopLocalMedia(stream); return }
         setStatus('正在连接 LiveKit 房间…')
-        const livekitRoom = await connectLiveKitRoom(result, callKind, { local: localVideoRef.current, remote: remoteVideoRef.current })
+        const livekitRoom = await connectLiveKitRoom(result, kind, { local: localVideoRef.current, remote: remoteVideoRef.current }, stream)
+        if (!mountedRef.current) { livekitRoom.disconnect(); return }
         setRoom(livekitRoom)
-        setStatus(callKind === 'video' ? '视频通话已连接' : '语音通话已连接')
+        setStatus(kind === 'video' ? '视频通话已连接' : '语音通话已连接')
         return
       }
-      // 私聊信令走 WebSocket：后端会在 onMessage 处理 call_accept 时回 call_accepted_with_token，
-      // 之后通过 connectedSession 走 connectAcceptedPrivateCall 流程自动连入 LiveKit 房间。
       signaling.send({
         fromUserId: session.userId,
         toUserId: incoming.fromUserId,
@@ -873,12 +1043,15 @@ function IncomingCallModal({
       })
       setStatus('已发送接听信令，等待对方房间信息…')
     } catch (reason) {
-      setStatus(reason instanceof Error ? reason.message : '接听失败')
-      setAccepting(false)
+      if (mountedRef.current) {
+        setStatus(reason instanceof Error ? reason.message : '接听失败')
+        setAccepting(false)
+      }
     }
   }
 
   async function close() {
+    stopLocalMedia(localStream)
     if (room && incoming.type === 'call_group_started') {
       await api.leaveGroupCall(session.sessionId, incoming.roomName).catch(() => undefined)
     }
@@ -886,7 +1059,12 @@ function IncomingCallModal({
     onClose()
   }
 
-  return <div className="call-backdrop"><section className={`call-card ${callKind === 'video' ? 'video-call-card' : ''}`}>{callKind === 'video' ? <div className="call-video-stage"><div className="call-video-remote" ref={remoteVideoRef}><span>等待对方视频…</span></div><div className="call-video-local" ref={localVideoRef}><span>本地视频</span></div></div> : <div className="call-pulse"><Avatar initials={incoming.type === 'call_group_started' ? '群' : '来'} color="#d48758" size="lg" /></div>}<h2>{incoming.type === 'call_group_started' ? `群聊 ${incoming.groupId}` : `用户 ${incoming.fromUserId}`}</h2><p>邀请你进行{callKind === 'video' ? '视频' : '语音'}通话</p><div className="call-status"><Wifi />{status}</div><div className="call-room">房间：{incoming.roomName}</div><div className="call-buttons">{!room && <button className="primary-button" disabled={accepting} onClick={accept} title="接听"><Phone /></button>}<button className="hangup" onClick={close} title={room ? '挂断' : '拒绝'}><Phone /></button></div></section></div>
+  const showVideo = chosenKind === 'video' && accepting
+  return <div className="call-backdrop"><section className={`call-card ${showVideo ? 'video-call-card' : ''}`}>
+    <div className="call-video-stage" style={{ display: showVideo ? undefined : 'none' }}><div className="call-video-remote" ref={remoteVideoRef} /><div className="call-video-local" ref={localVideoRef} /></div>
+    {!showVideo && <div className="call-pulse"><Avatar initials={incoming.type === 'call_group_started' ? '群' : '来'} color="#d48758" size="lg" /></div>}
+    <h2>{incoming.type === 'call_group_started' ? `群聊 ${incoming.groupId}` : `用户 ${incoming.fromUserId}`}</h2><p>{accepting ? (chosenKind === 'video' ? '视频通话中' : '语音通话中') : '邀请你进行通话'}</p><div className="call-status"><Wifi />{status}</div><div className="call-room">房间：{incoming.roomName}</div><div className="call-buttons">{!room && !accepting && <><button className="primary-button" onClick={() => accept('voice')} title="语音接听"><Phone /></button><button className="primary-button" onClick={() => accept('video')} title="视频接听"><Video /></button></>}<button className="hangup" onClick={close} title={room ? '挂断' : '拒绝'}><Phone /></button></div>
+  </section></div>
 }
 
 function MainApp({ session, onLogout }: { session: Session; onLogout: () => void }) {
@@ -904,9 +1082,11 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [callSignalStatus, setCallSignalStatus] = useState<'connecting' | 'ready' | 'disconnected'>(session.demo ? 'disconnected' : 'connecting')
   const latestSeqRef = useRef(new Map<string, number>())
   const pendingMessagesRef = useRef(new Map<string, { conversationId: EntityId; text: string; mediaUrl?: string; fileName?: string }>())
-  // 自己发过的消息 msgId 集合。历史接口不返回 senderUid（后端这块还没接通），
-  // 但自己发过的消息会有 SEND_ACK，msgId 会被服务端分配并回传，把这个 msgId 记下来，
-  // 渲染历史时查这个集合就能正确判断 fromMe。持久化到 localStorage，客户端重启后仍能识别。
+  // 自己发过的消息 msgId 集合，作为 fromMe 判定的兜底：
+  // 历史接口虽然已返回 senderUid（toHistoryDelivery 会写入 fromUid），
+  // 但为了兼容服务端 senderUid 缺/为 0 的旧数据，以及实时消息尚未收齐前先渲染本地消息，
+  // 仍把 SEND_ACK 拿到的 msgId 记下来，渲染历史时查这个集合就能正确判断 fromMe。
+  // 持久化到 localStorage，客户端重启后仍能识别。
   const sentMsgIdsRef = useRef<Set<string>>(loadSentMsgIds(session.sessionId))
   const selectedConversation = useMemo(() => conversations.find((item) => item.id === selected) ?? null, [conversations, selected])
   const signaling = useMemo(() => new CallSignaling(), [])
@@ -972,6 +1152,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
         }
       }
       if (remoteMessages.length > 0) {
+        remoteMessages.sort((a, b) => Number(a.seq ?? a.id) - Number(b.seq ?? b.id))
         latestSeqRef.current.set(String(selectedConversation.id), Number(remoteMessages.at(-1)?.seq ?? 0))
         setMessages((current) => {
           const otherMessages = current.filter((message) => String(message.conversationId) !== String(selectedConversation.id))
@@ -1026,7 +1207,8 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     }
   }, [loadDirectory, session.demo])
   useEffect(() => {
-    if (session.demo || !window.mochatDesktop?.chat) return
+    console.log('[MainApp] chat effect:', { demo: session.demo, hasChat: !!window.mochatDesktop?.chat, gatewayUrl: getChatGatewayUrl() })
+    if (session.demo || !window.mochatDesktop?.chat) { console.warn('[MainApp] chat effect skipped: demo=', session.demo, 'hasChat=', !!window.mochatDesktop?.chat); return }
     setChatStatus('connecting')
     window.mochatDesktop.chat.connect({ gatewayUrl: getChatGatewayUrl() }).catch((reason) => {
       console.warn('MoChat chat gateway connect failed', reason)
@@ -1146,11 +1328,11 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
           return
         }
         if (payload.type === 'call_invite' && payload.fromUserId && payload.roomName) {
-          setIncomingCall({ type: 'call_invite', callId: payload.callId, fromUserId: payload.fromUserId, roomName: payload.roomName, callKind: payload.callKind || 'voice' })
+          setIncomingCall({ type: 'call_invite', callId: payload.callId, fromUserId: payload.fromUserId, roomName: payload.roomName, callKind: payload.callKind })
           return
         }
         if (payload.type === 'call_group_started' && payload.fromUserId && payload.groupId && payload.roomName) {
-          setIncomingCall({ type: 'call_group_started', callId: payload.callId, fromUserId: payload.fromUserId, groupId: payload.groupId, roomName: payload.roomName, callKind: payload.callKind || 'voice' })
+          setIncomingCall({ type: 'call_group_started', callId: payload.callId, fromUserId: payload.fromUserId, groupId: payload.groupId, roomName: payload.roomName, callKind: payload.callKind })
           return
         }
         if (payload.type === 'call_accepted_with_token' && payload.roomName && payload.token && payload.livekitUrl) {
@@ -1241,9 +1423,9 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     <Sidebar section={section} setSection={setSection} session={session} onLogout={onLogout} />
     {section === 'chats' ? <><ConversationList items={conversations} selected={selected} onSelect={setSelected} />{directoryLoading ? <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="正在加载会话" text="正在从后端读取好友与群组" /></section> : selectedConversation ? <Chat conversation={selectedConversation} messages={messages} serviceMode={!session.demo} onSend={send} onCall={setCall} onDetails={() => setDetailsConversation(selectedConversation)} /> : <section className="chat-panel"><EmptyState icon={<MessageSquare />} title="暂无会话" text={directoryError || '后端当前没有返回好友或群组'} /></section>}</> : <Directory section={section} session={session} conversations={conversations} onRefreshDirectory={() => loadDirectory()} onOpenConversation={(conversationId) => { setSelected(conversationId); setSection('chats') }} />}
     <div className={`connection-pill ${session.demo || chatStatus !== 'connected' ? 'demo' : ''}`}>{session.demo || chatStatus !== 'connected' ? <WifiOff /> : <Wifi />}{session.demo ? '演示模式' : chatStatus === 'connected' ? (callSignalStatus === 'ready' ? '聊天与通话已连接' : '聊天已连接') : chatStatus === 'reconnecting' ? '聊天服务重连中' : chatStatus === 'connecting' ? '聊天服务连接中' : '聊天服务已断开'}<ChevronDown /></div>
-    {call && selectedConversation && <CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} />}
+    {call && selectedConversation && <CallErrorBoundary onClose={() => setCall(null)}><CallModal session={session} conversation={selectedConversation} kind={call} onClose={() => setCall(null)} /></CallErrorBoundary>}
     {detailsConversation && <ConversationDetailsModal session={session} conversation={detailsConversation} contacts={conversations.filter((item) => item.kind === 'private')} onRefreshDirectory={() => loadDirectory()} onClose={() => setDetailsConversation(null)} />}
-    {incomingCall && <IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} signaling={signaling} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} />}
+    {incomingCall && <CallErrorBoundary onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }}><IncomingCallModal session={session} incoming={incomingCall} connectedSession={connectedIncomingCall} signaling={signaling} onConnectedConsumed={() => setConnectedIncomingCall(null)} onClose={() => { setIncomingCall(null); setConnectedIncomingCall(null) }} /></CallErrorBoundary>}
   </main>
 }
 

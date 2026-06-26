@@ -111,8 +111,8 @@ export interface MediaUpload {
 
 export interface ChatGatewayContent {
   encryptedText?: {
-    nonce?: string
-    ciphertext?: string
+    nonce?: unknown
+    ciphertext?: unknown
   }
   plainText?: {
     text?: string

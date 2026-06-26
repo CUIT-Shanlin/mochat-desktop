@@ -195,6 +195,7 @@ class ChatGatewayClient {
   connect({ gatewayUrl }) {
     this.manualClose = false
     this.connectOptions = parseGatewayUrl(gatewayUrl)
+    console.log('[ChatGatewayClient] connecting to', gatewayUrl, 'parsed:', this.connectOptions)
     this.openSocket()
   }
 
@@ -238,6 +239,7 @@ class ChatGatewayClient {
     })
     this.socket = socket
     socket.once('secureConnect', () => {
+      console.log('[ChatGatewayClient] TLS handshake complete, connected=true')
       this.connected = true
       this.reconnectAttempts = 0
       this.sendEvent({ type: 'state', state: 'connected' })
@@ -245,9 +247,11 @@ class ChatGatewayClient {
     })
     socket.on('data', (chunk) => this.handleData(chunk))
     socket.on('error', (error) => {
+      console.log('[ChatGatewayClient] socket error:', error.message)
       this.sendEvent({ type: 'socket-error', message: error.message })
     })
     socket.on('close', () => {
+      console.log('[ChatGatewayClient] socket closed, connected=false')
       this.connected = false
       this.stopHeartbeat()
       this.sendEvent({ type: 'state', state: 'disconnected' })
